@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+
+  --color-base-950: oklch(0.13 0.01 270);
+  --color-base-900: oklch(0.17 0.012 270);
+  --color-base-800: oklch(0.22 0.014 270);
+  --color-base-700: oklch(0.30 0.016 270);
+  --color-base-600: oklch(0.40 0.018 270);
+  --color-base-500: oklch(0.55 0.018 270);
+  --color-base-400: oklch(0.70 0.014 270);
+  --color-base-300: oklch(0.82 0.012 270);
+  --color-base-200: oklch(0.90 0.008 270);
+
+  --color-accent-cyan: oklch(0.78 0.18 200);
+  --color-accent-violet: oklch(0.70 0.22 295);
+  --color-accent-magenta: oklch(0.72 0.24 340);
+  --color-accent-green: oklch(0.78 0.20 145);
+  --color-accent-amber: oklch(0.82 0.18 80);
+  --color-accent-red: oklch(0.70 0.22 25);
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-base-950);
+  color: var(--color-base-200);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-base-700); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-base-600); }
+
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 currentColor; opacity: 0.9; }
+  70%  { box-shadow: 0 0 0 10px transparent; opacity: 0; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 0; }
+}
+.pulse-ring { animation: pulse-ring 1.6s ease-out infinite; }
+
+@keyframes scan {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(200%); }
+}
+.scanline::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 0%, rgba(56, 224, 255, 0.04) 50%, transparent 100%);
+  pointer-events: none;
+  animation: scan 8s linear infinite;
+}
+
+.glass {
+  background: color-mix(in oklch, var(--color-base-900) 80%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid color-mix(in oklch, var(--color-base-700) 60%, transparent);
+}
+
+.glow-cyan    { box-shadow: 0 0 20px -4px var(--color-accent-cyan), 0 0 40px -8px var(--color-accent-cyan); }
+.glow-violet  { box-shadow: 0 0 20px -4px var(--color-accent-violet), 0 0 40px -8px var(--color-accent-violet); }
+.glow-green   { box-shadow: 0 0 20px -4px var(--color-accent-green); }
+.glow-red     { box-shadow: 0 0 20px -4px var(--color-accent-red); }
+
+.grid-bg {
+  background-image:
+    linear-gradient(color-mix(in oklch, var(--color-accent-cyan) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in oklch, var(--color-accent-cyan) 6%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
