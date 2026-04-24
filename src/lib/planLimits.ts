@@ -21,29 +21,33 @@ export interface PlanLimits {
   monthlySpendLimit: number;
 }
 
+// These defaults are deliberate over-estimates so first-time bars don't read
+// "100% used" on a fresh install. The user can — and should — calibrate
+// against claude.ai's exact percentages via the Calibrate UI in the Usage
+// panel (which back-computes the real limit from their current usage).
 export const PLAN_DEFAULTS: Record<PlanTier, PlanLimits> = {
   pro: {
     label: "Pro",
-    sessionLimit: 50_000,
-    weeklyAllLimit: 1_500_000,
-    weeklySonnetLimit: 1_500_000,
-    weeklyOpusLimit: 50_000,
+    sessionLimit: 200_000,
+    weeklyAllLimit: 10_000_000,
+    weeklySonnetLimit: 10_000_000,
+    weeklyOpusLimit: 200_000,
     monthlySpendLimit: 0,
   },
   "max-5x": {
     label: "Max (5x)",
-    sessionLimit: 250_000,
-    weeklyAllLimit: 7_500_000,
-    weeklySonnetLimit: 7_500_000,
-    weeklyOpusLimit: 250_000,
+    sessionLimit: 1_000_000,
+    weeklyAllLimit: 50_000_000,
+    weeklySonnetLimit: 50_000_000,
+    weeklyOpusLimit: 1_000_000,
     monthlySpendLimit: 100,
   },
   "max-20x": {
     label: "Max (20x)",
-    sessionLimit: 1_000_000,
-    weeklyAllLimit: 30_000_000,
-    weeklySonnetLimit: 30_000_000,
-    weeklyOpusLimit: 1_000_000,
+    sessionLimit: 5_000_000,
+    weeklyAllLimit: 200_000_000,
+    weeklySonnetLimit: 200_000_000,
+    weeklyOpusLimit: 5_000_000,
     monthlySpendLimit: 200,
   },
   custom: {
@@ -55,6 +59,13 @@ export const PLAN_DEFAULTS: Record<PlanTier, PlanLimits> = {
     monthlySpendLimit: 0,
   },
 };
+
+/// Back-calculate a token limit from "claude.ai shows X% used" + the actual
+/// token count we measured. Returns 0 if % is invalid or 0.
+export function calibrateLimit(actualUsedTokens: number, percentOnClaudeAi: number): number {
+  if (percentOnClaudeAi <= 0 || actualUsedTokens <= 0) return 0;
+  return Math.round(actualUsedTokens / (percentOnClaudeAi / 100));
+}
 
 export interface PlanSettings extends PlanLimits {
   tier: PlanTier;

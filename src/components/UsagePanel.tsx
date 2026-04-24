@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, Zap, Info, ExternalLink } from "lucide-react";
+import { RefreshCw, Zap, Info, ExternalLink, Target, Check } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost } from "../lib/cn";
 import {
+  calibrateLimit,
   DEFAULT_PLAN_SETTINGS,
   describeWeeklyReset,
   parsePlanSettings,
@@ -82,6 +83,20 @@ export function UsagePanel() {
   const resetText = describeWeeklyReset(plan.weeklyResetDay, plan.weeklyResetHour);
   const resetCountdown = timeUntilWeeklyReset(plan.weeklyResetDay, plan.weeklyResetHour);
 
+  // When user calibrates a row, persist the back-computed limit then refresh.
+  const onCalibrate = async (settingsKey: string, used: number, pct: number) => {
+    const newLimit = calibrateLimit(used, pct);
+    if (newLimit <= 0) return;
+    try {
+      await api.settingsSet(settingsKey, String(newLimit));
+      // Also flip tier to custom so it doesn't get stomped by tier-default reset.
+      await api.settingsSet("plan_tier", "custom");
+      await refresh();
+    } catch (e) {
+      console.error("calibrate failed", e);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-base-900/40 border border-base-800 rounded-lg overflow-hidden">
       {/* Header */}
@@ -118,6 +133,7 @@ export function UsagePanel() {
             }
             used={sessionTokens}
             limit={plan.sessionLimit}
+            onCalibrate={(p) => onCalibrate("plan_session_limit", sessionTokens, p)}
           />
         </Section>
 
@@ -140,18 +156,21 @@ export function UsagePanel() {
             sublabel={`Resets ${resetText} (${resetCountdown})`}
             used={allTokens}
             limit={plan.weeklyAllLimit}
+            onCalibrate={(p) => onCalibrate("plan_weekly_all_limit", allTokens, p)}
           />
           <UsageRow
             label="Sonnet only"
             sublabel={`Resets ${resetText}`}
             used={sonnetTokens}
             limit={plan.weeklySonnetLimit}
+            onCalibrate={(p) => onCalibrate("plan_weekly_sonnet_limit", sonnetTokens, p)}
           />
           <UsageRow
             label="Opus only"
             sublabel={`Resets ${resetText}`}
             used={opusTokens}
             limit={plan.weeklyOpusLimit}
+            onCalibrate={(p) => onCalibrate("plan_weekly_opus_limit", opusTokens, p)}
           />
           {haikuTokens > 0 && (
             <UsageRow
@@ -236,47 +255,107 @@ function Section({
 }
 
 function UsageRow({
-  label, sublabel, used, limit, unit,
+  label, sublabel, used, limit, unit, onCalibrate,
 }: {
   label: string;
   sublabel: string;
   used: number;
   limit: number;
   unit?: "dollar";
+  /// Optional: when provided, render a tiny "calibrate" widget. The user
+  /// types the % shown on claude.ai for this row; we back-compute the limit.
+  onCalibrate?: (percentOnClaudeAi: number) => void;
 }) {
   const pct = limit > 0 ? (used / limit) * 100 : 0;
   const cappedPct = Math.min(100, pct);
   const over = pct > 100;
+  const [calibrating, setCalibrating] = useState(false);
+  const [calValue, setCalValue] = useState("");
   return (
     <div className="grid grid-cols-[160px_1fr_70px] items-center gap-3 py-2.5">
       <div>
-        <div className="text-sm font-medium">{label}</div>
+        <div className="text-sm font-medium flex items-center gap-1.5">
+          {label}
+          {onCalibrate && used > 0 && (
+            <button
+              onClick={() => {
+                setCalibrating((v) => !v);
+                setCalValue("");
+              }}
+              className="text-base-600 hover:text-(--color-accent-cyan) transition"
+              title="Calibrate this bar against claude.ai's exact %"
+            >
+              <Target size={11} />
+            </button>
+          )}
+        </div>
         <div className="text-[11px] text-base-500">{sublabel}</div>
       </div>
-      <div className="h-2 bg-base-800 rounded-full overflow-hidden relative">
-        {limit > 0 ? (
-          <div
-            className={cn(
-              "h-full rounded-full transition-all",
-              over ? "bg-(--color-accent-cyan)" : "bg-(--color-accent-cyan)",
-            )}
-            style={{ width: `${cappedPct}%` }}
+
+      {calibrating && onCalibrate ? (
+        <div className="flex items-center gap-1.5 col-span-2">
+          <span className="text-[11px] text-base-500 shrink-0">claude.ai shows:</span>
+          <input
+            type="number"
+            value={calValue}
+            onChange={(e) => setCalValue(e.target.value)}
+            placeholder="9"
+            min={0.1}
+            max={100}
+            step={0.1}
+            autoFocus
+            className="w-16 bg-base-950 border border-base-700 rounded px-2 py-0.5 text-xs font-mono outline-none focus:border-(--color-accent-cyan)"
           />
-        ) : (
-          <div className="h-full w-full bg-base-700/30 [background:repeating-linear-gradient(45deg,transparent,transparent_4px,rgba(255,255,255,0.05)_4px,rgba(255,255,255,0.05)_8px)]" />
-        )}
-      </div>
-      <div className="text-right text-xs font-mono">
-        {limit > 0 ? (
-          <span className={cn(over ? "text-(--color-accent-red)" : "text-base-400")}>
-            {Math.round(pct)}% used
-          </span>
-        ) : unit === "dollar" ? (
-          <span className="text-base-500">{fmtCost(used)}</span>
-        ) : (
-          <span className="text-base-500">no limit set</span>
-        )}
-      </div>
+          <span className="text-[11px] text-base-500">%</span>
+          <button
+            onClick={() => {
+              const p = Number(calValue);
+              if (p > 0 && p <= 100) {
+                onCalibrate(p);
+                setCalibrating(false);
+              }
+            }}
+            disabled={!calValue || Number(calValue) <= 0}
+            className="ml-auto px-2 py-0.5 rounded bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) text-[11px] flex items-center gap-1 disabled:opacity-40"
+            title="Back-compute limit and save"
+          >
+            <Check size={10} /> Save
+          </button>
+          <button
+            onClick={() => setCalibrating(false)}
+            className="text-base-500 hover:text-base-200 text-[11px]"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="h-2 bg-base-800 rounded-full overflow-hidden relative">
+            {limit > 0 ? (
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  over ? "bg-(--color-accent-red)" : "bg-(--color-accent-cyan)",
+                )}
+                style={{ width: `${cappedPct}%` }}
+              />
+            ) : (
+              <div className="h-full w-full bg-base-700/30 [background:repeating-linear-gradient(45deg,transparent,transparent_4px,rgba(255,255,255,0.05)_4px,rgba(255,255,255,0.05)_8px)]" />
+            )}
+          </div>
+          <div className="text-right text-xs font-mono">
+            {limit > 0 ? (
+              <span className={cn(over ? "text-(--color-accent-red)" : "text-base-400")}>
+                {Math.round(pct)}% used
+              </span>
+            ) : unit === "dollar" ? (
+              <span className="text-base-500">{fmtCost(used)}</span>
+            ) : (
+              <span className="text-base-500">no limit</span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
