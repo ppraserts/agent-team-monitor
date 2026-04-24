@@ -87,18 +87,26 @@ impl AgentManager {
         spec: AgentSpec,
         resume: ResumeOptions,
     ) -> Result<AgentSnapshot> {
-        // Reject duplicate name BEFORE spawning, atomically.
-        {
+        // Reject duplicate name BEFORE spawning, atomically + capture live roster
+        // so we can inject the ACTUAL team names (not hardcoded ones) into the
+        // new agent's system prompt.
+        let live_roster: Vec<String> = {
             let reg = self.registry.read();
             if reg.by_name.contains_key(&spec.name) {
                 return Err(anyhow!("agent name '{}' already exists", spec.name));
             }
-        }
+            reg.by_name.keys().cloned().collect()
+        };
 
         let adapter = make_adapter(spec.vendor.as_deref())?;
         let id = uuid::Uuid::new_v4().to_string();
 
-        let mut cmd = adapter.build_command(&spec, &resume)?;
+        // Patch the spec so the agent sees the live roster, including its own
+        // name. This lets users name agents anything (e.g. "PM1", "PM2") and
+        // still have @mention routing work.
+        let effective_spec = inject_team_roster(&spec, &live_roster);
+
+        let mut cmd = adapter.build_command(&effective_spec, &resume)?;
         cmd.current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -130,6 +138,9 @@ impl AgentManager {
             Arc::new(move |msg: &str| adapter_for_encode.encode_user_message(msg))
         };
 
+        // Store the ORIGINAL spec (without injected roster) in the handle so the
+        // sidebar / history panels show the user's clean prompt — the roster is
+        // an internal detail.
         let handle = Arc::new(AgentHandle {
             id: id.clone(),
             spec: spec.clone(),
@@ -414,6 +425,46 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
 
     // Update last_seen on any activity (cheap; only one row touched).
     let _ = mgr.db.touch_agent_seen(agent_id);
+}
+
+/// Append a live team-roster section to the agent's system prompt so it knows
+/// the ACTUAL names of its teammates (which the user may have customized,
+/// e.g. "PM1" / "PM2"). Includes the new agent's own name so it can refer to
+/// itself accurately.
+fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
+    let mut all_names: Vec<String> = live_roster.to_vec();
+    if !all_names.iter().any(|n| n == &spec.name) {
+        all_names.push(spec.name.clone());
+    }
+    all_names.sort();
+
+    let roster_line = if all_names.len() <= 1 {
+        format!(
+            "\n\n--- ACTIVE TEAM ROSTER (at your spawn time) ---\nYou are the first agent on the team — there are no other teammates yet. Ask the user to spawn additional roles when needed.\nYour own name: @{}\n",
+            spec.name,
+        )
+    } else {
+        let others: Vec<String> = all_names
+            .iter()
+            .filter(|n| **n != spec.name)
+            .map(|n| format!("@{}", n))
+            .collect();
+        format!(
+            "\n\n--- ACTIVE TEAM ROSTER (at your spawn time) ---\nYou are: @{}\nTeammates available right now: {}\n(More teammates may be spawned later — when in doubt, ask the user. To address a teammate, write `@TheirExactName <message>` on a new line.)\n",
+            spec.name,
+            others.join(" "),
+        )
+    };
+
+    let new_prompt = match &spec.system_prompt {
+        Some(p) if !p.trim().is_empty() => Some(format!("{}{}", p.trim_end(), roster_line)),
+        _ => Some(roster_line.trim_start().to_string()),
+    };
+
+    AgentSpec {
+        system_prompt: new_prompt,
+        ..spec.clone()
+    }
 }
 
 /// Look for `@AgentName` mentions in assistant text and route the trailing
