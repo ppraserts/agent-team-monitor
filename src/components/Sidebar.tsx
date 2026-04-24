@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Bot, Plus, Terminal, Folder, Activity, Zap, History, RotateCcw, Settings,
 } from "lucide-react";
+import { Logo } from "./Logo";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
@@ -58,15 +59,12 @@ export function Sidebar({ onSpawn, onOpenSettings, onResume }: Props) {
     <aside className="w-72 shrink-0 border-r border-base-800 bg-base-900/60 flex flex-col">
       {/* Header */}
       <div className="px-4 py-4 border-b border-base-800 flex items-center gap-3">
-        <div className="relative">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-(--color-accent-cyan) to-(--color-accent-violet) flex items-center justify-center">
-            <Bot size={20} className="text-base-950" />
-          </div>
-          <div className="absolute inset-0 rounded-lg pulse-ring text-(--color-accent-cyan)" />
-        </div>
+        <Logo size={40} />
         <div className="flex-1">
-          <div className="text-sm font-semibold tracking-wide">CLAUDE MONITOR</div>
-          <div className="text-[10px] text-base-500 tracking-widest">MULTI-AGENT CONTROL</div>
+          <div className="text-sm font-semibold tracking-wide bg-gradient-to-r from-(--color-accent-cyan) to-(--color-accent-violet) bg-clip-text text-transparent">
+            AGENT TEAM
+          </div>
+          <div className="text-[10px] text-base-500 tracking-widest">MONITOR · v0.1</div>
         </div>
         <button
           onClick={onOpenSettings}

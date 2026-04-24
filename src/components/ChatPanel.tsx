@@ -14,13 +14,6 @@ interface Props {
 
 export function ChatPanel({ agentId, onClose }: Props) {
   const record = useStore((s) => s.agents[agentId]);
-  const agentsByName = useStore(
-    useShallow((s) =>
-      Object.fromEntries(
-        Object.values(s.agents).map((a) => [a.snapshot.spec.name, a.snapshot]),
-      ),
-    ),
-  );
   const agentsById = useStore(
     useShallow((s) =>
       Object.fromEntries(
@@ -30,6 +23,135 @@ export function ChatPanel({ agentId, onClose }: Props) {
   );
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Autocomplete state for `/commands` and `@mentions`.
+  type SuggestItem = {
+    label: string;       // displayed text
+    insert: string;      // text to write into the input on accept
+    hint?: string;       // small grey hint after the label
+    /// "replace-all" — overwrite the whole input (slash commands).
+    /// "replace-token" — replace just the @token at the caret (mentions).
+    mode: "replace-all" | "replace-token";
+  };
+  const [suggest, setSuggest] = useState<{ items: SuggestItem[]; selected: number } | null>(
+    null,
+  );
+
+  const computeSuggestions = (text: string, caret: number): SuggestItem[] => {
+    // ---- Slash commands (must start at line beginning) ----
+    if (text.startsWith("/")) {
+      const parts = text.split(/\s+/);
+      const cmdToken = parts[0].slice(1).toLowerCase();
+      // First word? → command name suggestions.
+      if (parts.length === 1) {
+        const cmds: SuggestItem[] = [
+          { label: "/agent", insert: "/agent ", hint: "spawn agent from preset", mode: "replace-all" },
+          { label: "/spawn", insert: "/spawn ", hint: "alias of /agent", mode: "replace-all" },
+          { label: "/kill", insert: "/kill ", hint: "terminate agent by name", mode: "replace-all" },
+          { label: "/list", insert: "/list", hint: "show current team", mode: "replace-all" },
+          { label: "/help", insert: "/help", hint: "show all commands", mode: "replace-all" },
+        ];
+        return cmds.filter((c) => c.label.slice(1).toLowerCase().startsWith(cmdToken));
+      }
+      // /agent <preset...>  or  /spawn <preset...>
+      if (cmdToken === "agent" || cmdToken === "spawn") {
+        const partial = (parts[1] ?? "").toLowerCase();
+        return PRESETS
+          .filter((p) => p.name.toLowerCase().startsWith(partial))
+          .map((p) => ({
+            label: p.name,
+            insert: `/${cmdToken} ${p.name}`,
+            hint: p.role,
+            mode: "replace-all" as const,
+          }));
+      }
+      // /kill <name...>
+      if (cmdToken === "kill") {
+        const partial = (parts[1] ?? "").replace(/^@/, "").toLowerCase();
+        return Object.values(useStore.getState().agents)
+          .filter(
+            (a) =>
+              a.snapshot.id !== agentId &&
+              a.snapshot.spec.name.toLowerCase().startsWith(partial),
+          )
+          .map((a) => ({
+            label: `@${a.snapshot.spec.name}`,
+            insert: `/kill ${a.snapshot.spec.name}`,
+            hint: a.snapshot.spec.role,
+            mode: "replace-all" as const,
+          }));
+      }
+      return [];
+    }
+
+    // ---- @mentions (anywhere; trigger is `@` after start-of-line or whitespace) ----
+    const before = text.slice(0, caret);
+    const m = before.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+    if (m) {
+      const partial = m[1].toLowerCase();
+      return Object.values(useStore.getState().agents)
+        .filter(
+          (a) =>
+            a.snapshot.id !== agentId &&
+            a.snapshot.spec.name.toLowerCase().startsWith(partial),
+        )
+        .map((a) => ({
+          label: `@${a.snapshot.spec.name}`,
+          insert: a.snapshot.spec.name,
+          hint: a.snapshot.spec.role,
+          mode: "replace-token" as const,
+        }));
+    }
+
+    return [];
+  };
+
+  const refreshSuggest = (text: string, caret: number) => {
+    const items = computeSuggestions(text, caret);
+    if (items.length === 0) {
+      setSuggest(null);
+    } else {
+      setSuggest((prev) => ({
+        items,
+        selected: Math.min(prev?.selected ?? 0, items.length - 1),
+      }));
+    }
+  };
+
+  const acceptSuggestion = () => {
+    if (!suggest || suggest.items.length === 0) return;
+    const item = suggest.items[suggest.selected];
+    if (item.mode === "replace-all") {
+      const newText = item.insert;
+      setInput(newText);
+      // Move caret to end after React applies the value.
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.selectionStart = ta.selectionEnd = newText.length;
+          ta.focus();
+        }
+      });
+    } else {
+      // Replace last @token before the caret with the chosen name.
+      const ta = textareaRef.current;
+      const caret = ta?.selectionStart ?? input.length;
+      const before = input.slice(0, caret);
+      const after = input.slice(caret);
+      const replaced = before.replace(/@([A-Za-z0-9_-]*)$/, `@${item.insert} `);
+      const newText = replaced + after;
+      const newCaret = replaced.length;
+      setInput(newText);
+      requestAnimationFrame(() => {
+        if (ta) {
+          ta.selectionStart = ta.selectionEnd = newCaret;
+          ta.focus();
+        }
+      });
+    }
+    setSuggest(null);
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -247,19 +369,90 @@ Available presets: ${presetList}`,
 
       {/* Input */}
       <div className="border-t border-base-800 p-2 bg-base-900/80">
-        <div className="flex items-end gap-2">
+        <div className="flex items-end gap-2 relative">
+          {/* Autocomplete dropdown */}
+          {suggest && suggest.items.length > 0 && (
+            <div className="absolute bottom-full mb-1 left-0 right-12 max-h-56 overflow-y-auto rounded-md border border-base-700 bg-base-950/95 backdrop-blur shadow-xl z-20">
+              <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-base-500 border-b border-base-800 flex items-center justify-between">
+                <span>{suggest.items.length} suggestions</span>
+                <span className="font-mono">↑↓ Tab/Enter Esc</span>
+              </div>
+              {suggest.items.map((it, i) => (
+                <button
+                  key={i}
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // keep textarea focused
+                    setSuggest({ items: suggest.items, selected: i });
+                    acceptSuggestion();
+                  }}
+                  className={cn(
+                    "w-full text-left px-3 py-1.5 text-sm flex items-baseline gap-2 transition",
+                    i === suggest.selected
+                      ? "bg-(--color-accent-cyan)/15 text-(--color-accent-cyan)"
+                      : "hover:bg-base-800/60 text-base-200",
+                  )}
+                >
+                  <span className="font-mono shrink-0">{it.label}</span>
+                  {it.hint && (
+                    <span className="text-[10px] text-base-500 truncate">— {it.hint}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
           <textarea
+            ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              refreshSuggest(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            }}
+            onSelect={(e) => {
+              const ta = e.currentTarget;
+              refreshSuggest(ta.value, ta.selectionStart);
+            }}
+            onBlur={() => {
+              // Delay so onMouseDown of suggestion can fire first.
+              setTimeout(() => setSuggest(null), 100);
+            }}
             onKeyDown={(e) => {
+              // When suggest is open, hijack arrow / tab / enter / escape.
+              if (suggest && suggest.items.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSuggest({
+                    items: suggest.items,
+                    selected: (suggest.selected + 1) % suggest.items.length,
+                  });
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSuggest({
+                    items: suggest.items,
+                    selected:
+                      (suggest.selected - 1 + suggest.items.length) % suggest.items.length,
+                  });
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  acceptSuggestion();
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSuggest(null);
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 submit();
               }
             }}
-            placeholder={`Message ${snapshot.spec.name}…  (try: @${
-              Object.keys(agentsByName).find((n) => n !== snapshot.spec.name) ?? "Other"
-            } can you help? · /agent QA · /help)`}
+            placeholder={`Message ${snapshot.spec.name}…  (type / for commands, @ for mentions)`}
             rows={2}
             className="flex-1 resize-none bg-base-950 border border-base-700 rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
           />

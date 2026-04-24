@@ -1,0 +1,25 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="atm-stroke" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5ed3ff"/>
+      <stop offset="100%" stop-color="#c792ea"/>
+    </linearGradient>
+    <radialGradient id="atm-core" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0%" stop-color="#bfeeff"/>
+      <stop offset="55%" stop-color="#5b8df0"/>
+      <stop offset="100%" stop-color="#2a1a55"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="29" fill="none" stroke="url(#atm-stroke)" stroke-width="0.5" opacity="0.35"/>
+  <g stroke="url(#atm-stroke)" stroke-width="1.2" opacity="0.7">
+    <line x1="32" y1="32" x2="32" y2="9"/>
+    <line x1="32" y1="32" x2="52" y2="44"/>
+    <line x1="32" y1="32" x2="12" y2="44"/>
+  </g>
+  <polygon points="32,19 42.4,25 42.4,37 32,43 21.6,37 21.6,25"
+           fill="url(#atm-core)" stroke="url(#atm-stroke)" stroke-width="1.5"/>
+  <polygon points="32,25 38.5,36 25.5,36" fill="white" opacity="0.85"/>
+  <circle cx="32" cy="9" r="3" fill="#5ed3ff"/>
+  <circle cx="52" cy="44" r="3" fill="#c792ea"/>
+  <circle cx="12" cy="44" r="3" fill="#ff8ec7"/>
+</svg>

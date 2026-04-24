@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Claude Monitor",
+  "productName": "Agent Team Monitor",
   "version": "0.1.0",
   "identifier": "com.claudemonitor.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Claude Monitor",
+        "title": "Agent Team Monitor",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
