@@ -111,3 +111,41 @@ export interface ExternalSession {
   size_bytes: number;
   modified_at: string;
 }
+
+export interface HistoryAgent {
+  id: string;
+  spec: AgentSpec;
+  session_id: string | null;
+  message_count: number;
+  usage: AgentUsage;
+  last_seen_at: string;
+}
+
+export interface HistoryMessage {
+  id: string;
+  role: string;
+  content: string;
+  from_agent_id: string | null;
+  tool_name: string | null;
+  tool_input: unknown | null;
+  ts: string;
+}
+
+export interface UsageStats {
+  today_input_tokens: number;
+  today_output_tokens: number;
+  today_cost_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+  total_turns: number;
+  total_agents: number;
+}
+
+export interface CustomPreset {
+  name: string;
+  role: string;
+  color: string | null;
+  group_name: string;
+  system_prompt: string | null;
+}

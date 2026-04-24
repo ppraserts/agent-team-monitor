@@ -1,16 +1,22 @@
 import { useEffect, useState } from "react";
-import { Bot, Plus, Terminal, Folder, Activity, Zap } from "lucide-react";
+import {
+  Bot, Plus, Terminal, Folder, Activity, Zap, History, RotateCcw, Settings,
+} from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
-import type { ExternalSession } from "../types";
+import type { ExternalSession, HistoryAgent } from "../types";
 
 interface Props {
   onSpawn: () => void;
+  onOpenSettings: () => void;
+  /// Resume a past agent — caller spawns a new agent with `--resume <session_id>`
+  /// and pre-loads its message history into the store.
+  onResume: (h: HistoryAgent) => Promise<void> | void;
 }
 
-export function Sidebar({ onSpawn }: Props) {
+export function Sidebar({ onSpawn, onOpenSettings, onResume }: Props) {
   const agents = useStore(useShallow((s) => Object.values(s.agents)));
   const ptys = useStore(useShallow((s) => Object.values(s.ptys)));
   const activeId = useStore((s) => s.activeTileId);
@@ -20,10 +26,26 @@ export function Sidebar({ onSpawn }: Props) {
 
   const [externals, setExternals] = useState<ExternalSession[]>([]);
   const [externalsOpen, setExternalsOpen] = useState(false);
+  const [history, setHistory] = useState<HistoryAgent[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(true);
 
   useEffect(() => {
     api.listExternalSessions().then(setExternals).catch(() => {});
+    refreshHistory();
   }, []);
+
+  const refreshHistory = () => {
+    api.historyListAgents(20).then(setHistory).catch(() => {});
+  };
+
+  // Refresh history list whenever agents change (spawn / kill).
+  useEffect(() => {
+    refreshHistory();
+  }, [agents.length]);
+
+  // Hide active agents from history — they're shown above already.
+  const liveIds = new Set(agents.map((a) => a.snapshot.id));
+  const pastAgents = history.filter((h) => !liveIds.has(h.id));
 
   const totalCost = agents.reduce((s, a) => s + a.snapshot.usage.total_cost_usd, 0);
   const totalTokens = agents.reduce(
@@ -46,6 +68,13 @@ export function Sidebar({ onSpawn }: Props) {
           <div className="text-sm font-semibold tracking-wide">CLAUDE MONITOR</div>
           <div className="text-[10px] text-base-500 tracking-widest">MULTI-AGENT CONTROL</div>
         </div>
+        <button
+          onClick={onOpenSettings}
+          className="text-base-500 hover:text-(--color-accent-cyan) transition"
+          title="Settings"
+        >
+          <Settings size={16} />
+        </button>
       </div>
 
       {/* Usage summary */}
@@ -106,6 +135,25 @@ export function Sidebar({ onSpawn }: Props) {
               }}
             />
           ))}
+        </Section>
+
+        <Section
+          label="Recent Agents"
+          count={pastAgents.length}
+          collapsible
+          open={historyOpen}
+          onToggle={() => setHistoryOpen((v) => !v)}
+        >
+          {historyOpen && pastAgents.length === 0 && (
+            <Empty>No past agents yet.</Empty>
+          )}
+          {historyOpen &&
+            pastAgents.slice(0, 20).map((h) => (
+              <HistoryRow key={h.id} h={h} onResume={() => onResume(h)} onDelete={async () => {
+                await api.historyDeleteAgent(h.id).catch(() => {});
+                refreshHistory();
+              }} />
+            ))}
         </Section>
 
         <Section
@@ -284,6 +332,55 @@ function PtyRow({
       </div>
     </div>
   );
+}
+
+function HistoryRow({
+  h,
+  onResume,
+  onDelete,
+}: {
+  h: HistoryAgent;
+  onResume: () => void;
+  onDelete: () => void;
+}) {
+  const ago = relTime(h.last_seen_at);
+  return (
+    <div className="group px-2 py-1.5 rounded-md hover:bg-base-800/40 transition flex items-start gap-2">
+      <History size={11} className="text-base-500 mt-1 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="text-xs truncate font-medium">{h.spec.name}</div>
+        <div className="text-[10px] text-base-500 truncate">
+          {h.message_count} msgs · {fmtNumber(h.usage.input_tokens + h.usage.output_tokens)} tok · {ago}
+        </div>
+      </div>
+      <button
+        onClick={onResume}
+        className="opacity-0 group-hover:opacity-100 text-(--color-accent-cyan) hover:text-(--color-accent-cyan) text-[11px] transition"
+        title={
+          h.session_id
+            ? `Resume Claude session ${h.session_id.slice(0, 8)}`
+            : "No session_id; will spawn fresh with this config"
+        }
+      >
+        <RotateCcw size={12} />
+      </button>
+      <button
+        onClick={onDelete}
+        className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red) text-xs transition"
+        title="Delete from history"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+function relTime(iso: string): string {
+  const ago = (Date.now() - +new Date(iso)) / 1000;
+  if (ago < 60) return "just now";
+  if (ago < 3600) return `${Math.floor(ago / 60)}m ago`;
+  if (ago < 86400) return `${Math.floor(ago / 3600)}h ago`;
+  return `${Math.floor(ago / 86400)}d ago`;
 }
 
 function fmtBytes(b: number): string {

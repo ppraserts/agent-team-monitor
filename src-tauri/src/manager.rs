@@ -25,7 +25,8 @@ use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::adapter::{make_adapter, AgentAdapter, ParsedEvent};
-use crate::agent::{AgentEvent, AgentSnapshot, AgentSpec, AgentStatus, AgentUsage};
+use crate::agent::{AgentEvent, AgentSnapshot, AgentSpec, AgentStatus, AgentUsage, ResumeOptions};
+use crate::db::Db;
 
 const EVENT_CHANNEL: &str = "agent://event";
 
@@ -50,6 +51,7 @@ pub struct AgentManager {
     /// Single struct holds both maps to make updates atomic under one lock.
     registry: Arc<RwLock<Registry>>,
     app: AppHandle,
+    db: Arc<Db>,
 }
 
 #[derive(Default)]
@@ -59,10 +61,11 @@ struct Registry {
 }
 
 impl AgentManager {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, db: Arc<Db>) -> Self {
         Self {
             registry: Arc::new(RwLock::new(Registry::default())),
             app,
+            db,
         }
     }
 
@@ -76,6 +79,14 @@ impl AgentManager {
     }
 
     pub async fn spawn(&self, spec: AgentSpec) -> Result<AgentSnapshot> {
+        self.spawn_with_resume(spec, ResumeOptions::default()).await
+    }
+
+    pub async fn spawn_with_resume(
+        &self,
+        spec: AgentSpec,
+        resume: ResumeOptions,
+    ) -> Result<AgentSnapshot> {
         // Reject duplicate name BEFORE spawning, atomically.
         {
             let reg = self.registry.read();
@@ -87,7 +98,7 @@ impl AgentManager {
         let adapter = make_adapter(spec.vendor.as_deref())?;
         let id = uuid::Uuid::new_v4().to_string();
 
-        let mut cmd = adapter.build_command(&spec)?;
+        let mut cmd = adapter.build_command(&spec, &resume)?;
         cmd.current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -139,6 +150,11 @@ impl AgentManager {
             reg.by_name.insert(spec.name.clone(), id.clone());
         }
 
+        // Persist agent metadata.
+        if let Err(e) = self.db.upsert_agent(&id, &spec) {
+            tracing::warn!("db upsert_agent failed: {}", e);
+        }
+
         spawn_stdin_pump(stdin, stdin_rx);
         spawn_stdout_reader(self.clone(), id.clone(), stdout, adapter);
         spawn_stderr_reader(self.clone(), id.clone(), stderr);
@@ -172,15 +188,28 @@ impl AgentManager {
         handle.stdin_tx.send(line).await
             .context("failed to send to agent stdin")?;
 
-        *handle.last_activity.write() = Utc::now();
+        let ts = Utc::now();
+        *handle.last_activity.write() = ts;
         *handle.message_count.write() += 1;
         self.set_status(agent_id, AgentStatus::Thinking);
 
+        // Persist + emit with same id.
+        let msg_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = self.db.save_message(
+            &msg_id,
+            agent_id,
+            "user",
+            &message,
+            from_agent_id.as_deref(),
+            ts,
+        ) {
+            tracing::warn!("db save_message failed: {}", e);
+        }
         self.emit(AgentEvent::Message {
             agent_id: agent_id.to_string(),
             role: "user".into(),
             content: message,
-            ts: Utc::now(),
+            ts,
             from_agent_id,
         });
         Ok(())
@@ -319,30 +348,48 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
     match event {
         ParsedEvent::SessionInit { session_id } => {
             if let Some(h) = mgr.registry.read().by_id.get(agent_id).cloned() {
-                *h.session_id.write() = Some(session_id);
+                *h.session_id.write() = Some(session_id.clone());
+            }
+            if let Err(e) = mgr.db.touch_agent_session(agent_id, &session_id) {
+                tracing::warn!("db touch_agent_session failed: {}", e);
             }
         }
         ParsedEvent::AssistantText { text } => {
             mgr.set_status(agent_id, AgentStatus::Working);
+            let ts = Utc::now();
             detect_and_route_mentions(mgr, agent_id, &text).await;
+
+            let msg_id = uuid::Uuid::new_v4().to_string();
+            if let Err(e) = mgr.db.save_message(&msg_id, agent_id, "assistant", &text, None, ts) {
+                tracing::warn!("db save_message(assistant) failed: {}", e);
+            }
             mgr.emit(AgentEvent::Message {
                 agent_id: agent_id.to_string(),
                 role: "assistant".into(),
                 content: text,
-                ts: Utc::now(),
+                ts,
                 from_agent_id: None,
             });
         }
         ParsedEvent::ToolUse { tool, input } => {
             mgr.set_status(agent_id, AgentStatus::Working);
+            let ts = Utc::now();
+            let msg_id = uuid::Uuid::new_v4().to_string();
+            if let Err(e) = mgr.db.save_tool_use(&msg_id, agent_id, &tool, &input, ts) {
+                tracing::warn!("db save_tool_use failed: {}", e);
+            }
             mgr.emit(AgentEvent::ToolUse {
                 agent_id: agent_id.to_string(),
                 tool,
                 input,
-                ts: Utc::now(),
+                ts,
             });
         }
         ParsedEvent::Result { usage: delta, duration_ms } => {
+            let ts = Utc::now();
+            if let Err(e) = mgr.db.save_usage(agent_id, &delta, duration_ms, ts) {
+                tracing::warn!("db save_usage failed: {}", e);
+            }
             if let Some(h) = mgr.registry.read().by_id.get(agent_id).cloned() {
                 let snapshot = {
                     let mut acc = h.usage.write();
@@ -364,6 +411,9 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
         }
         ParsedEvent::Other => {}
     }
+
+    // Update last_seen on any activity (cheap; only one row touched).
+    let _ = mgr.db.touch_agent_seen(agent_id);
 }
 
 /// Look for `@AgentName` mentions in assistant text and route the trailing

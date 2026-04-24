@@ -32,6 +32,13 @@ pub struct AgentSpec {
     pub mention_allowlist: Vec<String>,
 }
 
+/// Optional resume parameters when re-spawning an agent from history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResumeOptions {
+    /// Past Claude session id to resume (passed as `--resume <id>`).
+    pub session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {

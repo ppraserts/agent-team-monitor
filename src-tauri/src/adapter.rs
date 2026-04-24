@@ -8,7 +8,7 @@
 use anyhow::Result;
 use tokio::process::Command;
 
-use crate::agent::{AgentSpec, AgentUsage};
+use crate::agent::{AgentSpec, AgentUsage, ResumeOptions};
 
 /// Normalized event parsed from a vendor's stdout stream.
 #[derive(Debug, Clone)]
@@ -37,8 +37,9 @@ pub trait AgentAdapter: Send + Sync + 'static {
 
     /// Build a `Command` ready to spawn for this spec.
     /// Stdio piping + working dir are set by the manager — adapters only
-    /// configure binary, args, and env.
-    fn build_command(&self, spec: &AgentSpec) -> Result<Command>;
+    /// configure binary, args, and env. `resume` carries optional re-attach
+    /// parameters (e.g. Claude `--resume <session_id>`).
+    fn build_command(&self, spec: &AgentSpec, resume: &ResumeOptions) -> Result<Command>;
 
     /// Encode a user message into a single stdin line (must end with `\n`).
     fn encode_user_message(&self, msg: &str) -> String;
@@ -89,7 +90,7 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
         "claude"
     }
 
-    fn build_command(&self, spec: &AgentSpec) -> Result<Command> {
+    fn build_command(&self, spec: &AgentSpec, resume: &ResumeOptions) -> Result<Command> {
         let bin = Self::which()?;
         let mut cmd = Command::new(bin);
         cmd.arg("--print")
@@ -97,6 +98,9 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
             .arg("--input-format").arg("stream-json")
             .arg("--verbose");
 
+        if let Some(sid) = &resume.session_id {
+            cmd.arg("--resume").arg(sid);
+        }
         if spec.skip_permissions {
             cmd.arg("--dangerously-skip-permissions");
         }

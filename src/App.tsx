@@ -5,17 +5,19 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { SpawnDialog } from "./components/SpawnDialog";
+import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
 import { useStore } from "./store";
 import { api } from "./lib/api";
-import type { AgentEvent } from "./types";
+import type { AgentEvent, HistoryAgent } from "./types";
 import { cn } from "./lib/cn";
 
 type RightPaneMode = "feed" | "graph" | "off";
 
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [rightPane, setRightPane] = useState<RightPaneMode>("feed");
   const [mentionPulse, setMentionPulse] = useState<{ from: string; to: string; key: number } | null>(
     null,
@@ -37,7 +39,37 @@ export default function App() {
     api.homeDir().then(setHomeDir).catch(() => {});
     api.listVendors().then(setVendors).catch(() => {});
     api.listAgents().then((arr) => arr.forEach(upsertAgent)).catch(() => {});
+    // Load persisted theme on first paint.
+    api.settingsGetAll()
+      .then((s) => applyTheme((s.theme as any) || "cyan"))
+      .catch(() => {});
   }, [setHomeDir, setVendors, upsertAgent]);
+
+  /// Resume a past agent: spawn fresh with --resume <session_id>, then
+  /// pre-populate the chat panel with prior messages from the local DB.
+  const onResume = async (h: HistoryAgent) => {
+    try {
+      const snap = await api.resumeAgent(h.spec, h.session_id);
+      upsertAgent(snap);
+      const past = await api.historyLoadMessages(h.id);
+      // Stitch past messages into the new agent's panel so the user sees
+      // continuity. The new spawn has a different id; we replay messages
+      // under it so the existing ChatPanel just works.
+      for (const m of past) {
+        appendMessage(snap.id, {
+          id: m.id,
+          role: m.role as any,
+          content: m.content,
+          ts: m.ts,
+          from_agent_id: m.from_agent_id,
+          tool_name: m.tool_name ?? undefined,
+          tool_input: m.tool_input,
+        });
+      }
+    } catch (e) {
+      console.error("resume failed", e);
+    }
+  };
 
   // Use a ref so the unlisten function is captured the moment listen() resolves,
   // even if the effect's cleanup has already run. The `cancelled` flag handles
@@ -108,7 +140,11 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex bg-base-950 text-base-200 grid-bg">
-      <Sidebar onSpawn={() => setSpawnOpen(true)} />
+      <Sidebar
+        onSpawn={() => setSpawnOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onResume={onResume}
+      />
 
       <main className="flex-1 flex flex-col min-w-0">
         <div className="h-11 border-b border-base-800 px-3 flex items-center gap-3 bg-base-900/40 backdrop-blur">
@@ -170,6 +206,7 @@ export default function App() {
       </main>
 
       <SpawnDialog open={spawnOpen} onClose={() => setSpawnOpen(false)} />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

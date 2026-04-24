@@ -1,40 +1,179 @@
 import { useEffect, useState } from "react";
-import { X, Bot, Terminal as TerminalIcon, ShieldAlert, AtSign } from "lucide-react";
+import {
+  X, Bot, Terminal as TerminalIcon, ShieldAlert, AtSign, Save, Trash2,
+} from "lucide-react";
 import { api } from "../lib/api";
 import { useStore } from "../store";
 import { cn } from "../lib/cn";
-import type { VendorInfo } from "../types";
+import type { CustomPreset, VendorInfo } from "../types";
 
-const PRESETS = [
+// Full software team. Each agent gets the same `TEAMMATES` line so it knows
+// who else exists and how to address them.
+const TEAMMATES =
+  "@PM @Designer @Architect @Backend @Frontend @Mobile @DBA @DevOps @QA @Security @Reviewer @TechWriter";
+
+const TEAM_PROTOCOL = (you: string, persona: string) => `You are the ${you} agent on a multi-agent software team.
+
+ROLE: ${persona}
+
+TEAM PROTOCOL:
+- To delegate or ask a teammate, write \`@AgentName <message>\` on its own line.
+- Available teammates: ${TEAMMATES}
+- Only mention agents that already exist in the team. If a needed role isn't there, ask the user to spawn them.
+- Keep replies concise and action-oriented. Don't repeat what teammates already said.
+- When you finish a piece of work, summarize the result for the user in 1–3 lines.`;
+
+interface Preset {
+  name: string;
+  group: "Planning" | "Engineering" | "Quality" | "Ops" | "Design";
+  role: string;
+  color: string;
+  system_prompt: string;
+}
+
+const PRESETS: Preset[] = [
+  // ---------------- Planning ----------------
   {
-    name: "Backend",
-    role: "Senior backend engineer — APIs, DB, services",
-    color: "cyan",
-    system_prompt:
-      "You are the Backend agent on a multi-agent team. When you need design, security review, or frontend work done, address other agents directly on a new line as `@AgentName <message>`. Available teammates: @Frontend @Architect @Reviewer. Keep replies concise.",
-  },
-  {
-    name: "Frontend",
-    role: "Senior frontend engineer — React, UI/UX",
-    color: "violet",
-    system_prompt:
-      "You are the Frontend agent on a multi-agent team. To talk to another agent, write `@AgentName <message>` on its own line. Teammates: @Backend @Architect @Reviewer.",
+    name: "PM",
+    group: "Planning",
+    role: "Product manager — requirements, user stories, scope",
+    color: "magenta",
+    system_prompt: TEAM_PROTOCOL(
+      "PM",
+      "You translate vague user goals into concrete user stories and acceptance criteria. You decide WHAT gets built and in what order. You delegate technical design to @Architect, UX to @Designer, and quality concerns to @QA.",
+    ),
   },
   {
     name: "Architect",
-    role: "Software architect — design, planning",
+    group: "Planning",
+    role: "System architect — high-level design, tradeoffs",
+    color: "violet",
+    system_prompt: TEAM_PROTOCOL(
+      "Architect",
+      "You break features into components, choose tech, identify risks. You delegate implementation to @Backend / @Frontend / @Mobile / @DBA. You consult @Security on auth/data flow and @DevOps on deploy/scale.",
+    ),
+  },
+  // ---------------- Design ----------------
+  {
+    name: "Designer",
+    group: "Design",
+    role: "UI/UX designer — flows, wireframes, design system",
     color: "magenta",
-    system_prompt:
-      "You are the Architect. You break problems into pieces and delegate. Use `@Backend …` or `@Frontend …` on a new line to assign work. Then summarize the plan back to the user.",
+    system_prompt: TEAM_PROTOCOL(
+      "Designer",
+      "You design user flows, screen layouts, and interaction patterns. You hand off to @Frontend / @Mobile with concrete component specs. You consult @PM on user goals and @TechWriter on copy.",
+    ),
+  },
+  // ---------------- Engineering ----------------
+  {
+    name: "Backend",
+    group: "Engineering",
+    role: "Backend engineer — APIs, services, business logic",
+    color: "cyan",
+    system_prompt: TEAM_PROTOCOL(
+      "Backend",
+      "You implement server-side APIs and business logic. You ask @DBA for schema/query help, @Security for auth/threat checks, @DevOps for deploy/observability, and tell @Frontend / @Mobile when an API is ready.",
+    ),
+  },
+  {
+    name: "Frontend",
+    group: "Engineering",
+    role: "Frontend engineer — web UI implementation",
+    color: "cyan",
+    system_prompt: TEAM_PROTOCOL(
+      "Frontend",
+      "You implement web UI from @Designer's specs. You ask @Backend for API contracts, @Designer for missing states, and @QA when ready for testing.",
+    ),
+  },
+  {
+    name: "Mobile",
+    group: "Engineering",
+    role: "Mobile engineer — iOS / Android",
+    color: "cyan",
+    system_prompt: TEAM_PROTOCOL(
+      "Mobile",
+      "You implement native/cross-platform mobile UI. You ask @Backend for API contracts, @Designer for platform-specific patterns, and coordinate with @Frontend on shared logic.",
+    ),
+  },
+  {
+    name: "DBA",
+    group: "Engineering",
+    role: "Database engineer — schema, queries, migrations",
+    color: "cyan",
+    system_prompt: TEAM_PROTOCOL(
+      "DBA",
+      "You design schemas, write migrations, optimize queries. You consult @Architect on data model decisions and @Security on PII / encryption / access patterns.",
+    ),
+  },
+  // ---------------- Ops ----------------
+  {
+    name: "DevOps",
+    group: "Ops",
+    role: "DevOps / SRE — CI/CD, infra, observability",
+    color: "green",
+    system_prompt: TEAM_PROTOCOL(
+      "DevOps",
+      "You handle CI/CD, infrastructure, monitoring, and deploys. You ask @Backend / @Frontend for build requirements, @Security for hardening, and surface incidents quickly.",
+    ),
+  },
+  {
+    name: "Security",
+    group: "Ops",
+    role: "Security engineer — threat model, auth, vulns",
+    color: "red",
+    system_prompt: TEAM_PROTOCOL(
+      "Security",
+      "You threat-model new features, audit auth flows, and flag risky patterns (SQL injection, XSS, secrets in logs, weak crypto). You push back hard via @Backend / @Frontend / @DevOps when you see risk.",
+    ),
+  },
+  // ---------------- Quality ----------------
+  {
+    name: "QA",
+    group: "Quality",
+    role: "QA engineer — test plans, edge cases, regression",
+    color: "amber",
+    system_prompt: TEAM_PROTOCOL(
+      "QA",
+      "You write test plans, identify edge cases, run regression checks. You report bugs to @Backend / @Frontend / @Mobile with reproduction steps. You ask @PM for acceptance criteria when unclear.",
+    ),
   },
   {
     name: "Reviewer",
-    role: "Critical code reviewer — bugs, security",
+    group: "Quality",
+    role: "Code reviewer — bugs, smells, conventions",
     color: "amber",
-    system_prompt:
-      "You are the Reviewer. You read what other agents produce and push back. Address them with `@AgentName <feedback>`.",
+    system_prompt: TEAM_PROTOCOL(
+      "Reviewer",
+      "You read code others produced and push back on bugs, dead code, missing error handling, unclear naming, and convention violations. Address authors directly via `@Backend / @Frontend / @Mobile <specific feedback>`. Be concrete, cite file:line.",
+    ),
+  },
+  {
+    name: "TechWriter",
+    group: "Quality",
+    role: "Tech writer — docs, README, API reference",
+    color: "amber",
+    system_prompt: TEAM_PROTOCOL(
+      "TechWriter",
+      "You write user-facing docs, READMEs, and API references. You ask @Backend / @Frontend / @Mobile for examples, @Designer for screenshots, and @PM for the user story behind the feature.",
+    ),
   },
 ];
+
+const GROUP_ORDER: Preset["group"][] = [
+  "Planning",
+  "Design",
+  "Engineering",
+  "Ops",
+  "Quality",
+];
+
+const GROUP_COLOR: Record<Preset["group"], string> = {
+  Planning: "var(--color-accent-violet)",
+  Design: "var(--color-accent-magenta)",
+  Engineering: "var(--color-accent-cyan)",
+  Ops: "var(--color-accent-green)",
+  Quality: "var(--color-accent-amber)",
+};
 
 interface Props {
   open: boolean;
@@ -60,6 +199,45 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [skipPerms, setSkipPerms] = useState(false);
   const [allowMentions, setAllowMentions] = useState(true); // teamwork is the whole point — default on
   const [allowlist, setAllowlist] = useState(""); // comma-separated names; empty = any
+
+  const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
+
+  // Load defaults from settings on every open + custom presets list.
+  useEffect(() => {
+    if (!open) return;
+    api.settingsGetAll().then((s) => {
+      if (s.default_cwd && !cwd) setCwd(s.default_cwd);
+      if (s.default_skip_perms != null) setSkipPerms(s.default_skip_perms === "true");
+      if (s.default_allow_mentions != null)
+        setAllowMentions(s.default_allow_mentions !== "false");
+    }).catch(() => {});
+    api.presetsList().then(setCustomPresets).catch(() => {});
+  }, [open]);
+
+  const refreshCustomPresets = () =>
+    api.presetsList().then(setCustomPresets).catch(() => {});
+
+  const saveAsPreset = async () => {
+    if (!name.trim()) return;
+    const p: CustomPreset = {
+      name: name.trim(),
+      role: role.trim() || "Agent",
+      color: null,
+      group_name: "Custom",
+      system_prompt: systemPrompt.trim() || null,
+    };
+    try {
+      await api.presetsSave(p);
+      await refreshCustomPresets();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const deleteCustomPreset = async (n: string) => {
+    await api.presetsDelete(n);
+    await refreshCustomPresets();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -140,17 +318,68 @@ export function SpawnDialog({ open, onClose }: Props) {
         <div className="p-4 space-y-3">
           {tab === "agent" && (
             <>
-              <Field label="Quick presets">
-                <div className="flex flex-wrap gap-1.5">
-                  {PRESETS.map((p) => (
-                    <button
-                      key={p.name}
-                      onClick={() => applyPreset(p)}
-                      className="px-2 py-1 text-xs rounded-md bg-base-800/60 hover:bg-base-700/60 border border-base-700/50"
-                    >
-                      {p.name}
-                    </button>
-                  ))}
+              <Field label="Quick presets — full software team">
+                <div className="space-y-1.5">
+                  {GROUP_ORDER.map((g) => {
+                    const items = PRESETS.filter((p) => p.group === g);
+                    if (items.length === 0) return null;
+                    return (
+                      <div key={g} className="flex items-center gap-1.5 flex-wrap">
+                        <span
+                          className="text-[9px] font-mono uppercase tracking-wider w-16 shrink-0"
+                          style={{ color: GROUP_COLOR[g] }}
+                        >
+                          {g}
+                        </span>
+                        {items.map((p) => (
+                          <button
+                            key={p.name}
+                            onClick={() => applyPreset(p)}
+                            title={p.role}
+                            className="px-2 py-1 text-xs rounded-md bg-base-800/60 hover:bg-base-700/60 border transition"
+                            style={{
+                              borderColor: `color-mix(in oklch, ${GROUP_COLOR[g]} 30%, transparent)`,
+                            }}
+                          >
+                            {p.name}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })}
+                  {customPresets.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[9px] font-mono uppercase tracking-wider w-16 shrink-0 text-base-400">
+                        Custom
+                      </span>
+                      {customPresets.map((p) => (
+                        <div key={p.name} className="group relative">
+                          <button
+                            onClick={() =>
+                              applyPreset({
+                                name: p.name,
+                                group: "Quality",
+                                role: p.role,
+                                color: p.color ?? "amber",
+                                system_prompt: p.system_prompt ?? "",
+                              })
+                            }
+                            title={p.role}
+                            className="px-2 py-1 text-xs rounded-md bg-base-800/60 hover:bg-base-700/60 border border-base-600/50 transition pr-6"
+                          >
+                            {p.name}
+                          </button>
+                          <button
+                            onClick={() => deleteCustomPreset(p.name)}
+                            className="absolute right-1 top-1/2 -translate-y-1/2 text-base-500 hover:text-(--color-accent-red) opacity-0 group-hover:opacity-100 transition"
+                            title="Delete preset"
+                          >
+                            <Trash2 size={10} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </Field>
 
@@ -256,20 +485,34 @@ export function SpawnDialog({ open, onClose }: Props) {
           )}
         </div>
 
-        <div className="px-4 py-3 border-t border-base-800 flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 text-sm rounded-md hover:bg-base-800/60 text-base-400"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={submit}
-            disabled={busy || !name.trim() || !cwd.trim()}
-            className="px-4 py-1.5 text-sm rounded-md bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {busy ? "Spawning…" : "Spawn"}
-          </button>
+        <div className="px-4 py-3 border-t border-base-800 flex justify-between items-center gap-2">
+          {tab === "agent" ? (
+            <button
+              onClick={saveAsPreset}
+              disabled={!name.trim()}
+              className="px-3 py-1.5 text-xs rounded-md text-base-400 hover:text-base-200 hover:bg-base-800/60 disabled:opacity-30 disabled:cursor-not-allowed flex items-center gap-1.5"
+              title="Save current name + role + system prompt as a reusable custom preset"
+            >
+              <Save size={12} /> Save as preset
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm rounded-md hover:bg-base-800/60 text-base-400"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={busy || !name.trim() || !cwd.trim()}
+              className="px-4 py-1.5 text-sm rounded-md bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {busy ? "Spawning…" : "Spawn"}
+            </button>
+          </div>
         </div>
 
         <style>{`

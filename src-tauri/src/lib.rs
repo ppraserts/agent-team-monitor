@@ -1,20 +1,25 @@
 mod adapter;
 mod agent;
+mod db;
 mod manager;
 mod pty;
 mod sessions;
+
+use std::sync::Arc;
 
 use base64::Engine;
 use once_cell::sync::OnceCell;
 use serde::Serialize;
 
-use crate::agent::{AgentSnapshot, AgentSpec};
+use crate::agent::{AgentSnapshot, AgentSpec, ResumeOptions};
+use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, UsageStats};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
 
 static AGENT_MGR: OnceCell<AgentManager> = OnceCell::new();
 static PTY_MGR: OnceCell<PtyManager> = OnceCell::new();
+static DB: OnceCell<Arc<Db>> = OnceCell::new();
 
 fn agent_mgr() -> &'static AgentManager {
     AGENT_MGR.get().expect("AgentManager not initialized")
@@ -22,12 +27,23 @@ fn agent_mgr() -> &'static AgentManager {
 fn pty_mgr() -> &'static PtyManager {
     PTY_MGR.get().expect("PtyManager not initialized")
 }
+fn db() -> &'static Arc<Db> {
+    DB.get().expect("Db not initialized")
+}
 
 // ---------- Agent commands ----------
 
 #[tauri::command]
 async fn agent_spawn(spec: AgentSpec) -> Result<AgentSnapshot, String> {
     agent_mgr().spawn(spec).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_resume(spec: AgentSpec, session_id: Option<String>) -> Result<AgentSnapshot, String> {
+    agent_mgr()
+        .spawn_with_resume(spec, ResumeOptions { session_id })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -84,8 +100,8 @@ fn list_external_sessions() -> Result<Vec<ExternalSession>, String> {
 
 #[derive(Debug, Clone, Serialize)]
 struct VendorInfo {
-    name: String,    // "claude", "gemini", "codex", "aider"
-    binary: String,  // resolved path
+    name: String,
+    binary: String,
     version: Option<String>,
 }
 
@@ -147,6 +163,72 @@ fn home_dir() -> Option<String> {
     dirs::home_dir().and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
+// ---------- History / persistence commands ----------
+
+#[tauri::command]
+fn history_list_agents(limit: Option<usize>) -> Result<Vec<HistoryAgent>, String> {
+    db().list_recent_agents(limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_load_messages(agent_id: String) -> Result<Vec<HistoryMessage>, String> {
+    db().load_messages(&agent_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn history_delete_agent(agent_id: String) -> Result<(), String> {
+    db().delete_agent(&agent_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn usage_stats() -> Result<UsageStats, String> {
+    db().aggregate_stats().map_err(|e| e.to_string())
+}
+
+// ---------- Settings commands ----------
+
+#[tauri::command]
+fn settings_get_all() -> Result<std::collections::HashMap<String, String>, String> {
+    db().all_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn settings_set(key: String, value: String) -> Result<(), String> {
+    db().set_setting(&key, &value).map_err(|e| e.to_string())
+}
+
+// ---------- Custom preset commands ----------
+
+#[tauri::command]
+fn presets_list() -> Result<Vec<CustomPreset>, String> {
+    db().list_presets().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn presets_save(preset: CustomPreset) -> Result<(), String> {
+    db().save_preset(&preset).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn presets_delete(name: String) -> Result<(), String> {
+    db().delete_preset(&name).map_err(|e| e.to_string())
+}
+
+// ---------- Destructive ----------
+
+#[tauri::command]
+fn data_clear_all() -> Result<(), String> {
+    db().clear_all().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn data_path() -> String {
+    db().path().to_string_lossy().to_string()
+}
+
+// ---------- Run ----------
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -160,12 +242,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle().clone();
-            AGENT_MGR.set(AgentManager::new(handle.clone())).ok();
+            let db = Arc::new(Db::open_default().expect("open db"));
+            DB.set(db.clone()).ok();
+            AGENT_MGR.set(AgentManager::new(handle.clone(), db)).ok();
             PTY_MGR.set(PtyManager::new(handle)).ok();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             agent_spawn,
+            agent_resume,
             agent_send,
             agent_kill,
             agent_list,
@@ -177,6 +262,17 @@ pub fn run() {
             list_external_sessions,
             list_available_vendors,
             home_dir,
+            history_list_agents,
+            history_load_messages,
+            history_delete_agent,
+            usage_stats,
+            settings_get_all,
+            settings_set,
+            presets_list,
+            presets_save,
+            presets_delete,
+            data_clear_all,
+            data_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
