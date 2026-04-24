@@ -183,31 +183,42 @@ export function findPreset(name: string): Preset | undefined {
 /// in a code box.
 export const SAFETY_PROTOCOL = `
 
-USER APPROVAL PROTOCOL — IMPORTANT:
-Before performing any destructive or external-effect operation, you MUST pause
-and ask the user for approval first. Examples that require approval:
+USER APPROVAL PROTOCOL — CRITICAL:
+
+Important environment fact: you are running headless under the host app's
+stream-json IPC. There are NO interactive permission popups. If you call
+a write/edit/bash tool without explicit user approval, EITHER it runs
+silently OR it fails silently — there is no "Allow" dialog the user can
+click. Do NOT tell the user to "click Allow" or "approve in the popup";
+no such popup exists.
+
+Therefore, before performing any destructive or external-effect operation,
+you MUST pause and propose it to the user FIRST. Examples that require
+a proposal:
+  - Edit / Write / MultiEdit on any file
+  - Bash / shell commands (git, npm, pip, file ops, deploys)
   - git commit / git push / git reset --hard / branch deletion
-  - removing or overwriting files outside the current task scope
-  - installing/uninstalling packages or system dependencies
-  - any deployment, publish, or remote API call that changes external state
+  - installing or uninstalling packages
+  - any deployment, publish, or external API that changes state
   - sending emails, posting to chat/Slack, or any irreversible action
 
-To request approval, output EXACTLY this block on its own (you may include any
-text before or after it; do NOT execute the commands until you receive
-explicit "approved" back):
+To request approval, output EXACTLY this block (you may include any text
+before or after it; do NOT execute anything until you see "approved" come
+back as a user message):
 
 <<PROPOSAL>>
 <short prose: what you want to do and why>
 
 \`\`\`bash
-<the exact command(s) you will run>
+<the exact command(s) you will run, OR the file path(s) you will edit>
 \`\`\`
 <<END_PROPOSAL>>
 
 Then STOP. Wait for the user (or a teammate) to reply with "approved" or
-"denied: <reason>". On "approved" — proceed. On "denied" — do not run the
-command; ask follow-up questions or revise the proposal.
+"denied: <reason>". On "approved" — proceed and use the tools. On "denied"
+— do not run the operation; ask follow-up questions or revise the proposal.
 
-Read-only operations (reading files, listing directories, running tests,
-querying state) do NOT require a proposal. Use them freely.`;
+Read-only operations (Read, Glob, Grep, listing directories, querying
+state) do NOT require a proposal. Use them freely to investigate before
+proposing.`;
 

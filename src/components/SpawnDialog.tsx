@@ -98,6 +98,13 @@ export function SpawnDialog({ open, onClose }: Props) {
           (systemPrompt.trim() || "") +
           (requireApproval ? SAFETY_PROTOCOL : "");
 
+        // IMPORTANT: in stream-json mode there are NO interactive permission
+        // popups, so without --dangerously-skip-permissions every Edit/Write/
+        // Bash call would fail silently. When require_approval is on, the
+        // proposal flow IS the permission gate — flip skip_permissions on
+        // automatically so Approve actually lets the tool run.
+        const effectiveSkipPerms = skipPerms || requireApproval;
+
         const snap = await api.spawnAgent({
           name: name.trim(),
           role: role.trim() || "Agent",
@@ -106,7 +113,7 @@ export function SpawnDialog({ open, onClose }: Props) {
           model: null,
           color: null,
           vendor: "claude",
-          skip_permissions: skipPerms,
+          skip_permissions: effectiveSkipPerms,
           allow_mentions: allowMentions,
           mention_allowlist: allowlist
             .split(",")
@@ -313,18 +320,26 @@ export function SpawnDialog({ open, onClose }: Props) {
                 checked={requireApproval}
                 onChange={setRequireApproval}
                 icon={<ShieldCheck size={12} />}
-                label="Require user approval for destructive ops"
-                hint="Adds an instruction so the agent emits <<PROPOSAL>>...<<END_PROPOSAL>> blocks before any commit / push / delete / deploy / external call. The chat panel renders an inline Approve/Deny card; clicking sends the response back to the agent. Recommended for any setup that has skip-permissions ON."
+                label="Require user approval for destructive ops (recommended)"
+                hint="Agent emits a <<PROPOSAL>>…<<END_PROPOSAL>> block before any tool that writes / commits / installs / deploys, and waits. The chat panel renders an inline Approve / Deny card. NOTE: this implicitly turns ON --dangerously-skip-permissions because the proposal flow IS the permission gate — without it the tools would fail silently in stream-json mode (no OS popups exist here)."
               />
 
-              <Toggle
-                checked={skipPerms}
-                onChange={setSkipPerms}
-                icon={<ShieldAlert size={12} />}
-                danger
-                label="Pass --dangerously-skip-permissions"
-                hint="DANGER: agent can run any tool (Bash, Edit, Write) without prompting. Combined with @mentions, a prompt-injected agent could instruct other agents to execute commands. Only enable for trusted local work — and pair with 'Require approval' above."
-              />
+              {!requireApproval && (
+                <Toggle
+                  checked={skipPerms}
+                  onChange={setSkipPerms}
+                  icon={<ShieldAlert size={12} />}
+                  danger
+                  label="Raw --dangerously-skip-permissions (no approval gate)"
+                  hint="DANGER: every Edit / Write / Bash call runs WITHOUT asking. Use only for trusted local automation. If you want safety, prefer 'Require approval' above instead — it lets tools run only after you click Approve in chat."
+                />
+              )}
+              {requireApproval && (
+                <div className="text-[10px] text-base-500 ml-6 -mt-1">
+                  (skip-permissions is implicitly ON; the approval cards in chat are
+                  what gate destructive actions.)
+                </div>
+              )}
             </div>
           )}
 
