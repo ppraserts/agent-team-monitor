@@ -51,6 +51,19 @@ export function BoardsPanel({ onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Inline-edit state (replaces native prompt/confirm/alert)
+  const [creatingBoard, setCreatingBoard] = useState(false);
+  const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
+  const [creatingColumn, setCreatingColumn] = useState(false);
+  const [renamingColumnId, setRenamingColumnId] = useState<number | null>(null);
+  const [creatingCardInColumn, setCreatingCardInColumn] = useState<number | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast((t) => (t === msg ? null : t)), 3500);
+  };
+
   const teamAgentNames = useStore(
     useShallow((s) => Object.values(s.agents).map((a) => a.snapshot.spec.name)),
   );
@@ -97,70 +110,74 @@ export function BoardsPanel({ onClose }: Props) {
   }, [activeBoardId]);
 
   // ---------- Board CRUD ----------
-  const onCreateBoard = async () => {
-    const name = prompt("Board name?");
-    if (!name?.trim()) return;
+  const onCreateBoard = async (name: string) => {
+    if (!name.trim()) return;
     setBusy(true);
     try {
       const b = await api.boardsCreate(name.trim(), null);
       await refreshBoards();
       setActiveBoardId(b.id);
+      setCreatingBoard(false);
     } catch (e: any) { setError(String(e?.message ?? e)); }
     finally { setBusy(false); }
   };
 
-  const onRenameBoard = async (b: Board) => {
-    const name = prompt("New board name?", b.name);
-    if (!name?.trim() || name.trim() === b.name) return;
+  const onRenameBoard = async (b: Board, name: string) => {
+    if (!name.trim() || name.trim() === b.name) {
+      setRenamingBoardId(null);
+      return;
+    }
     try {
       await api.boardsUpdate(b.id, name.trim(), b.description ?? null);
       await refreshBoards();
+      setRenamingBoardId(null);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
   const onDeleteBoard = async (b: Board) => {
-    if (!confirm(`Delete board "${b.name}"? All columns and cards inside are removed too.`)) return;
     try {
       await api.boardsDelete(b.id);
       const next = boards.filter((x) => x.id !== b.id);
       setBoards(next);
       if (activeBoardId === b.id) setActiveBoardId(next[0]?.id ?? null);
+      showToast(`Deleted board "${b.name}"`);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
   // ---------- Column CRUD ----------
-  const onAddColumn = async () => {
-    if (!activeBoardId) return;
-    const title = prompt("Column title?");
-    if (!title?.trim()) return;
+  const onAddColumn = async (title: string) => {
+    if (!activeBoardId || !title.trim()) return;
     const color = COLUMN_PALETTE[columns.length % COLUMN_PALETTE.length];
     try {
       await api.columnsCreate(activeBoardId, title.trim(), color);
       await refreshBoard(activeBoardId);
+      setCreatingColumn(false);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
-  const onRenameColumn = async (c: BoardColumn) => {
-    const title = prompt("New column title?", c.title);
-    if (!title?.trim() || title.trim() === c.title) return;
+  const onRenameColumn = async (c: BoardColumn, title: string) => {
+    if (!title.trim() || title.trim() === c.title) {
+      setRenamingColumnId(null);
+      return;
+    }
     try {
       await api.columnsUpdate(c.id, title.trim(), c.color);
       await refreshBoard(activeBoardId!);
+      setRenamingColumnId(null);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
   const onDeleteColumn = async (c: BoardColumn) => {
-    if (!confirm(`Delete column "${c.title}" and all its cards?`)) return;
     try {
       await api.columnsDelete(c.id);
       await refreshBoard(activeBoardId!);
+      showToast(`Deleted column "${c.title}"`);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
   // ---------- Card CRUD ----------
-  const onAddCard = async (columnId: number) => {
-    const title = prompt("Card title?");
-    if (!title?.trim()) return;
+  const onAddCard = async (columnId: number, title: string) => {
+    if (!title.trim()) return;
     try {
       const card = await api.cardsCreate(columnId, {
         title: title.trim(),
@@ -169,6 +186,7 @@ export function BoardsPanel({ onClose }: Props) {
         labels: [],
       });
       await refreshBoard(activeBoardId!);
+      setCreatingCardInColumn(null);
       setEditingCard(card);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
@@ -188,18 +206,18 @@ export function BoardsPanel({ onClose }: Props) {
   };
 
   const onDeleteCard = async (id: number) => {
-    if (!confirm("Delete this card?")) return;
     try {
       await api.cardsDelete(id);
       useStore.getState().unlinkCard(id);
       setCards((cs) => cs.filter((c) => c.id !== id));
       if (editingCard?.id === id) setEditingCard(null);
+      showToast("Card deleted");
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
   const onSendCard = async (card: BoardCard) => {
     if (card.assignees.length === 0) {
-      alert("Pick at least one assignee first.");
+      showToast("Pick at least one assignee first.");
       return;
     }
     const text = `[BOARD TASK] ${card.title}\n\n${card.description ?? ""}`.trim();
@@ -247,8 +265,10 @@ export function BoardsPanel({ onClose }: Props) {
       );
     }
 
-    if (sent < card.assignees.length) {
-      alert(
+    if (sent === card.assignees.length) {
+      showToast(`Sent "${card.title}" to ${sent} agent${sent === 1 ? "" : "s"}.`);
+    } else {
+      showToast(
         `Sent to ${sent} of ${card.assignees.length}. The rest aren't currently spawned.`,
       );
     }
@@ -392,7 +412,7 @@ export function BoardsPanel({ onClose }: Props) {
 
   return (
     <>
-    <div className="h-full w-full flex flex-col bg-base-950/40 border-t border-base-800">
+    <div className="relative h-full w-full flex flex-col bg-base-950/40 border-t border-base-800">
       {/* Header */}
       <div className="px-3 py-1.5 border-b border-base-800 flex items-center justify-between shrink-0 bg-base-900/40">
         <div className="text-[11px] font-semibold tracking-wide flex items-center gap-1.5 text-(--color-accent-cyan)">
@@ -409,15 +429,24 @@ export function BoardsPanel({ onClose }: Props) {
         <div className="flex-1 flex min-h-0">
           {/* Boards list */}
           <aside className="w-56 shrink-0 border-r border-base-800 flex flex-col">
-            <button
-              onClick={onCreateBoard}
-              disabled={busy}
-              className="m-2 px-2 py-1.5 text-xs rounded-md bg-(--color-accent-cyan)/15 hover:bg-(--color-accent-cyan)/25 border border-(--color-accent-cyan)/30 text-(--color-accent-cyan) flex items-center justify-center gap-1.5"
-            >
-              <Plus size={12} /> New board
-            </button>
+            {creatingBoard ? (
+              <InlineCreator
+                placeholder="Board name"
+                onSubmit={onCreateBoard}
+                onCancel={() => setCreatingBoard(false)}
+                className="m-2"
+              />
+            ) : (
+              <button
+                onClick={() => setCreatingBoard(true)}
+                disabled={busy}
+                className="m-2 px-2 py-1.5 text-xs rounded-md bg-(--color-accent-cyan)/15 hover:bg-(--color-accent-cyan)/25 border border-(--color-accent-cyan)/30 text-(--color-accent-cyan) flex items-center justify-center gap-1.5"
+              >
+                <Plus size={12} /> New board
+              </button>
+            )}
             <div className="flex-1 overflow-y-auto px-1 pb-1 space-y-0.5">
-              {boards.length === 0 && (
+              {boards.length === 0 && !creatingBoard && (
                 <div className="text-xs text-base-600 italic p-3 text-center">
                   No boards yet. Click "+ New board".
                 </div>
@@ -425,7 +454,7 @@ export function BoardsPanel({ onClose }: Props) {
               {boards.map((b) => (
                 <div
                   key={b.id}
-                  onClick={() => setActiveBoardId(b.id)}
+                  onClick={() => renamingBoardId !== b.id && setActiveBoardId(b.id)}
                   className={cn(
                     "group px-2 py-1.5 rounded cursor-pointer flex items-center gap-1.5 transition border",
                     activeBoardId === b.id
@@ -435,22 +464,38 @@ export function BoardsPanel({ onClose }: Props) {
                 >
                   <KanbanSquare size={11} className="text-base-500 shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium truncate">{b.name}</div>
+                    {renamingBoardId === b.id ? (
+                      <InlineEdit
+                        initial={b.name}
+                        onSubmit={(v) => onRenameBoard(b, v)}
+                        onCancel={() => setRenamingBoardId(null)}
+                      />
+                    ) : (
+                      <div
+                        className="text-xs font-medium truncate"
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setRenamingBoardId(b.id);
+                        }}
+                      >
+                        {b.name}
+                      </div>
+                    )}
                   </div>
                   <button
-                    onClick={(e) => { e.stopPropagation(); onRenameBoard(b); }}
+                    onClick={(e) => { e.stopPropagation(); setRenamingBoardId(b.id); }}
                     className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-base-200 transition"
-                    title="Rename"
+                    title="Rename (or double-click name)"
                   >
                     <Pencil size={10} />
                   </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onDeleteBoard(b); }}
-                    className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red) transition"
-                    title="Delete"
-                  >
-                    <Trash2 size={10} />
-                  </button>
+                  <ConfirmIconButton
+                    icon={<Trash2 size={10} />}
+                    onConfirm={() => onDeleteBoard(b)}
+                    title="Delete board"
+                    className="opacity-0 group-hover:opacity-100"
+                    danger
+                  />
                 </div>
               ))}
             </div>
@@ -473,12 +518,20 @@ export function BoardsPanel({ onClose }: Props) {
                       </div>
                     )}
                   </div>
-                  <button
-                    onClick={onAddColumn}
-                    className="px-2 py-1 text-xs rounded-md bg-base-800/60 hover:bg-base-700/60 border border-base-700/50 flex items-center gap-1.5"
-                  >
-                    <Plus size={12} /> Column
-                  </button>
+                  {creatingColumn ? (
+                    <InlineCreator
+                      placeholder="Column title"
+                      onSubmit={onAddColumn}
+                      onCancel={() => setCreatingColumn(false)}
+                    />
+                  ) : (
+                    <button
+                      onClick={() => setCreatingColumn(true)}
+                      className="px-2 py-1 text-xs rounded-md bg-base-800/60 hover:bg-base-700/60 border border-base-700/50 flex items-center gap-1.5"
+                    >
+                      <Plus size={12} /> Column
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden p-3">
@@ -499,8 +552,14 @@ export function BoardsPanel({ onClose }: Props) {
                             key={col.id}
                             column={col}
                             cards={cardsByColumn.get(col.id) ?? []}
-                            onAddCard={() => onAddCard(col.id)}
-                            onRenameColumn={() => onRenameColumn(col)}
+                            isCreatingCard={creatingCardInColumn === col.id}
+                            isRenaming={renamingColumnId === col.id}
+                            onStartAddCard={() => setCreatingCardInColumn(col.id)}
+                            onSubmitAddCard={(title) => onAddCard(col.id, title)}
+                            onCancelAddCard={() => setCreatingCardInColumn(null)}
+                            onStartRename={() => setRenamingColumnId(col.id)}
+                            onSubmitRename={(t) => onRenameColumn(col, t)}
+                            onCancelRename={() => setRenamingColumnId(null)}
                             onDeleteColumn={() => onDeleteColumn(col)}
                             onClickCard={(c) => setEditingCard(c)}
                             agentCardLink={agentCardLink}
@@ -517,8 +576,18 @@ export function BoardsPanel({ onClose }: Props) {
         </div>
 
       {error && (
-        <div className="mx-3 mb-2 p-2 rounded bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 text-[11px] text-(--color-accent-red)">
-          {error}
+        <div className="mx-3 mb-2 p-2 rounded bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 text-[11px] text-(--color-accent-red) flex items-center justify-between">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="ml-2 hover:text-base-200">
+            <X size={11} />
+          </button>
+        </div>
+      )}
+
+      {toast && (
+        <div className="absolute top-12 right-4 z-30 px-3 py-2 rounded-md bg-base-900/95 border border-(--color-accent-cyan)/40 text-xs text-base-200 shadow-xl animate-in fade-in slide-in-from-top-2 duration-200 flex items-center gap-2">
+          <Check size={12} className="text-(--color-accent-cyan)" />
+          {toast}
         </div>
       )}
     </div>
@@ -545,13 +614,23 @@ export function BoardsPanel({ onClose }: Props) {
 // ----- Column -----
 
 function ColumnView({
-  column, cards, onAddCard, onRenameColumn, onDeleteColumn, onClickCard,
+  column, cards,
+  isCreatingCard, isRenaming,
+  onStartAddCard, onSubmitAddCard, onCancelAddCard,
+  onStartRename, onSubmitRename, onCancelRename,
+  onDeleteColumn, onClickCard,
   agentCardLink, agentsByName,
 }: {
   column: BoardColumn;
   cards: BoardCard[];
-  onAddCard: () => void;
-  onRenameColumn: () => void;
+  isCreatingCard: boolean;
+  isRenaming: boolean;
+  onStartAddCard: () => void;
+  onSubmitAddCard: (title: string) => void;
+  onCancelAddCard: () => void;
+  onStartRename: () => void;
+  onSubmitRename: (title: string) => void;
+  onCancelRename: () => void;
   onDeleteColumn: () => void;
   onClickCard: (c: BoardCard) => void;
   agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
@@ -588,9 +667,23 @@ function ColumnView({
           <GripVertical size={12} />
         </button>
         <div className="flex-1 min-w-0">
-          <div className="text-xs font-semibold truncate" style={{ color: column.color ?? undefined }}>
-            {column.title}
-          </div>
+          {isRenaming ? (
+            <InlineEdit
+              initial={column.title}
+              onSubmit={onSubmitRename}
+              onCancel={onCancelRename}
+              color={column.color ?? undefined}
+            />
+          ) : (
+            <div
+              className="text-xs font-semibold truncate cursor-text"
+              style={{ color: column.color ?? undefined }}
+              onDoubleClick={onStartRename}
+              title="Double-click to rename"
+            >
+              {column.title}
+            </div>
+          )}
         </div>
         <span className="text-[10px] text-base-500 font-mono">{cards.length}</span>
         <div className="relative">
@@ -608,17 +701,15 @@ function ColumnView({
               />
               <div className="absolute right-0 top-5 z-20 rounded-md border border-base-700 bg-base-950 shadow-lg min-w-32 py-1">
                 <button
-                  onClick={() => { setMenuOpen(false); onRenameColumn(); }}
+                  onClick={() => { setMenuOpen(false); onStartRename(); }}
                   className="w-full text-left px-2 py-1 text-xs hover:bg-base-800/60 flex items-center gap-1.5"
                 >
                   <Pencil size={11} /> Rename
                 </button>
-                <button
-                  onClick={() => { setMenuOpen(false); onDeleteColumn(); }}
-                  className="w-full text-left px-2 py-1 text-xs hover:bg-(--color-accent-red)/10 text-(--color-accent-red) flex items-center gap-1.5"
-                >
-                  <Trash2 size={11} /> Delete
-                </button>
+                <ConfirmMenuItem
+                  label="Delete column"
+                  onConfirm={() => { setMenuOpen(false); onDeleteColumn(); }}
+                />
               </div>
             </>
           )}
@@ -650,12 +741,21 @@ function ColumnView({
         )}
       </div>
 
-      <button
-        onClick={onAddCard}
-        className="m-1 px-2 py-1 text-[11px] rounded text-base-400 hover:bg-base-800/60 hover:text-base-200 flex items-center gap-1.5"
-      >
-        <Plus size={11} /> Add card
-      </button>
+      {isCreatingCard ? (
+        <InlineCreator
+          placeholder="Card title"
+          onSubmit={onSubmitAddCard}
+          onCancel={onCancelAddCard}
+          className="m-1"
+        />
+      ) : (
+        <button
+          onClick={onStartAddCard}
+          className="m-1 px-2 py-1 text-[11px] rounded text-base-400 hover:bg-base-800/60 hover:text-base-200 flex items-center gap-1.5"
+        >
+          <Plus size={11} /> Add card
+        </button>
+      )}
     </div>
   );
 }
@@ -769,10 +869,11 @@ function CardEditor({
     }));
   };
 
-  const addLabel = () => {
-    const l = prompt("Label name?");
-    if (!l?.trim()) return;
-    setDraft((d) => ({ ...d, labels: [...new Set([...d.labels, l.trim()])] }));
+  const [addingLabel, setAddingLabel] = useState(false);
+  const addLabel = (name: string) => {
+    if (!name.trim()) return;
+    setDraft((d) => ({ ...d, labels: [...new Set([...d.labels, name.trim()])] }));
+    setAddingLabel(false);
   };
   const removeLabel = (l: string) => {
     setDraft((d) => ({ ...d, labels: d.labels.filter((x) => x !== l) }));
@@ -855,12 +956,21 @@ function CardEditor({
                   </button>
                 </span>
               ))}
-              <button
-                onClick={addLabel}
-                className="px-1.5 py-0.5 text-[11px] rounded border border-base-700/50 text-base-400 hover:bg-base-800/60"
-              >
-                + add label
-              </button>
+              {addingLabel ? (
+                <InlineCreator
+                  placeholder="Label"
+                  onSubmit={addLabel}
+                  onCancel={() => setAddingLabel(false)}
+                  small
+                />
+              ) : (
+                <button
+                  onClick={() => setAddingLabel(true)}
+                  className="px-1.5 py-0.5 text-[11px] rounded border border-base-700/50 text-base-400 hover:bg-base-800/60"
+                >
+                  + add label
+                </button>
+              )}
             </div>
           </div>
 
@@ -871,12 +981,12 @@ function CardEditor({
         </div>
 
         <div className="px-4 py-3 border-t border-base-800 flex items-center gap-2">
-          <button
-            onClick={onDelete}
-            className="px-2 py-1.5 text-xs rounded text-(--color-accent-red) hover:bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 flex items-center gap-1.5"
-          >
-            <Trash2 size={12} /> Delete
-          </button>
+          <ConfirmTextButton
+            label="Delete"
+            confirmLabel="Click again to confirm"
+            icon={<Trash2 size={12} />}
+            onConfirm={onDelete}
+          />
           <button
             onClick={onSend}
             disabled={draft.assignees.length === 0}
@@ -911,5 +1021,204 @@ function CardEditor({
         </div>
       </div>
     </div>
+  );
+}
+
+// ===== Inline UI helpers =====
+
+/// Compact text input that submits on Enter, cancels on Esc, and saves on
+/// blur. Used to replace native prompt() for inline title editing.
+function InlineEdit({
+  initial, onSubmit, onCancel, color,
+}: {
+  initial: string;
+  onSubmit: (v: string) => void;
+  onCancel: () => void;
+  color?: string;
+}) {
+  const [val, setVal] = useState(initial);
+  return (
+    <input
+      autoFocus
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") onSubmit(val);
+        if (e.key === "Escape") onCancel();
+      }}
+      onBlur={() => onSubmit(val)}
+      className="w-full bg-base-950 border border-(--color-accent-cyan)/50 rounded px-1.5 py-0.5 text-xs font-medium outline-none"
+      style={color ? { color } : undefined}
+    />
+  );
+}
+
+/// Inline "create new <thing>" form: text input + Save / Cancel.
+function InlineCreator({
+  placeholder, onSubmit, onCancel, className, small,
+}: {
+  placeholder: string;
+  onSubmit: (v: string) => void;
+  onCancel: () => void;
+  className?: string;
+  small?: boolean;
+}) {
+  const [val, setVal] = useState("");
+  const submit = () => {
+    if (val.trim()) onSubmit(val.trim());
+  };
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-1 rounded-md border border-(--color-accent-cyan)/40 bg-base-950 p-1",
+        className,
+      )}
+    >
+      <input
+        autoFocus
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") submit();
+          if (e.key === "Escape") onCancel();
+        }}
+        placeholder={placeholder}
+        className={cn(
+          "flex-1 bg-transparent outline-none px-1.5",
+          small ? "text-[11px]" : "text-xs",
+        )}
+      />
+      <button
+        onClick={submit}
+        disabled={!val.trim()}
+        className="px-1.5 py-0.5 text-[10px] rounded bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 text-(--color-accent-cyan) disabled:opacity-30"
+      >
+        Save
+      </button>
+      <button
+        onClick={onCancel}
+        className="px-1.5 py-0.5 text-[10px] rounded text-base-500 hover:bg-base-800/60"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+/// Trash-icon-style button that arms on first click, fires on second.
+/// Auto-disarms after 2.5s of inactivity.
+function ConfirmIconButton({
+  icon, onConfirm, title, className, danger,
+}: {
+  icon: React.ReactNode;
+  onConfirm: () => void;
+  title: string;
+  className?: string;
+  danger?: boolean;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 2500);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        if (armed) {
+          onConfirm();
+          setArmed(false);
+        } else {
+          setArmed(true);
+        }
+      }}
+      title={armed ? "Click again to confirm" : title}
+      className={cn(
+        "transition px-1 rounded",
+        armed
+          ? "text-(--color-accent-red) bg-(--color-accent-red)/15 ring-1 ring-(--color-accent-red)/40 opacity-100"
+          : danger
+          ? "text-base-500 hover:text-(--color-accent-red)"
+          : "text-base-500 hover:text-base-200",
+        className,
+      )}
+    >
+      {icon}
+    </button>
+  );
+}
+
+/// Same arm-then-confirm pattern but for full-width text buttons (used in
+/// menus and the card-editor footer).
+function ConfirmTextButton({
+  label, confirmLabel, icon, onConfirm,
+}: {
+  label: string;
+  confirmLabel: string;
+  icon?: React.ReactNode;
+  onConfirm: () => void;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      onClick={() => {
+        if (armed) {
+          onConfirm();
+          setArmed(false);
+        } else {
+          setArmed(true);
+        }
+      }}
+      className={cn(
+        "px-2 py-1.5 text-xs rounded border flex items-center gap-1.5 transition",
+        armed
+          ? "bg-(--color-accent-red)/20 border-(--color-accent-red)/60 text-(--color-accent-red)"
+          : "text-(--color-accent-red) hover:bg-(--color-accent-red)/10 border-(--color-accent-red)/30",
+      )}
+    >
+      {icon} {armed ? confirmLabel : label}
+    </button>
+  );
+}
+
+/// Menu item variant of the same pattern, used inside the column ⋯ menu.
+function ConfirmMenuItem({
+  label, onConfirm,
+}: { label: string; onConfirm: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      onClick={() => {
+        if (armed) {
+          onConfirm();
+          setArmed(false);
+        } else {
+          setArmed(true);
+        }
+      }}
+      className={cn(
+        "w-full text-left px-2 py-1 text-xs flex items-center gap-1.5 transition",
+        armed
+          ? "bg-(--color-accent-red)/20 text-(--color-accent-red)"
+          : "hover:bg-(--color-accent-red)/10 text-(--color-accent-red)",
+      )}
+    >
+      <Trash2 size={11} /> {armed ? "Confirm delete" : label}
+    </button>
   );
 }
