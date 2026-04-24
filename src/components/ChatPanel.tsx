@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
@@ -164,11 +164,39 @@ export function ChatPanel({ agentId, onClose }: Props) {
     setSuggest(null);
   };
 
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  // "Stick to bottom" pattern. Only auto-scroll when the user is ALREADY
+  // near the bottom — if they've scrolled up to re-read something, don't
+  // yank them down. When they're not near the bottom and a new message
+  // arrives, we surface a floating "↓ Jump to latest" button instead.
+  const STICK_THRESHOLD = 80; // px
+  const [stuckToBottom, setStuckToBottom] = useState(true);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setStuckToBottom(distance < STICK_THRESHOLD);
+  };
+
+  // useLayoutEffect so the scroll happens BEFORE paint — no visible flash
+  // where the user briefly sees the old position then a jump.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (stuckToBottom) {
+      el.scrollTop = el.scrollHeight;
     }
+    // If not stuck, leave scroll where the user put it. The Jump button
+    // (rendered below) lets them rejoin the live tail.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [record?.messages.length]);
+
+  const jumpToLatest = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    setStuckToBottom(true);
+  };
 
   if (!record) return null;
   const { snapshot, messages } = record;
@@ -397,25 +425,40 @@ Available presets: ${presetList}`,
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-2 scanline relative">
-        {messages.length === 0 && (
-          <div className="text-xs text-base-600 italic p-4 text-center">
-            No messages yet. Type below to start the conversation.
-            <br />
-            Tip: use <span className="text-(--color-accent-cyan)">@AgentName</span>{" "}
-            in the agent's reply to route to another agent.
-          </div>
+      <div className="flex-1 min-h-0 relative">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="absolute inset-0 overflow-y-auto p-3 space-y-2 scanline"
+        >
+          {messages.length === 0 && (
+            <div className="text-xs text-base-600 italic p-4 text-center">
+              No messages yet. Type below to start the conversation.
+              <br />
+              Tip: use <span className="text-(--color-accent-cyan)">@AgentName</span>{" "}
+              in the agent's reply to route to another agent.
+            </div>
+          )}
+          {messages.map((m) => (
+            <MessageBubble
+              key={m.id}
+              msg={m}
+              agentId={agentId}
+              fromAgentName={
+                m.from_agent_id ? agentsById[m.from_agent_id]?.spec.name : undefined
+              }
+            />
+          ))}
+        </div>
+        {!stuckToBottom && messages.length > 0 && (
+          <button
+            onClick={jumpToLatest}
+            className="absolute bottom-3 right-1/2 translate-x-1/2 px-3 py-1.5 rounded-full bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) text-[11px] font-mono shadow-lg transition flex items-center gap-1"
+            title="Scroll to the latest message"
+          >
+            ↓ Jump to latest
+          </button>
         )}
-        {messages.map((m) => (
-          <MessageBubble
-            key={m.id}
-            msg={m}
-            agentId={agentId}
-            fromAgentName={
-              m.from_agent_id ? agentsById[m.from_agent_id]?.spec.name : undefined
-            }
-          />
-        ))}
       </div>
 
       <SkillsDialog
