@@ -95,10 +95,16 @@ export async function respawnAgent(
   await waitForAgentRemoved(oldName, 5_000);
 
   const newSnap = await api.spawnAgent(newSpec);
-  // The backend's `created` event will upsert the new agent into the store.
-  await new Promise((r) => setTimeout(r, 50));
 
+  // CRITICAL: insert the new agent ourselves BEFORE replaying messages.
+  // The backend's `created` event would also do this, but it arrives via
+  // Tauri IPC and is racy — if appendMessage runs before the agent exists
+  // in the store, every replayed message is silently dropped (the chat
+  // panel then renders blank). Inserting eagerly here makes the order
+  // deterministic; the eventual `created` event becomes a no-op upsert
+  // that preserves our messages array.
   const s = useStore.getState();
+  s.upsertAgent(newSnap);
   for (const m of oldMessages) {
     s.appendMessage(newSnap.id, { ...m, id: crypto.randomUUID() });
   }
