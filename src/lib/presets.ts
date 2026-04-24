@@ -167,3 +167,47 @@ export function findPreset(name: string): Preset | undefined {
   const lower = name.toLowerCase();
   return PRESETS.find((p) => p.name.toLowerCase() === lower);
 }
+
+// ---------------------------------------------------------------------------
+// Safety / approval protocol
+// ---------------------------------------------------------------------------
+
+/// Convention-based "ask before destructive op" protocol. When a spawned
+/// agent has require_approval=true (the default), this block is appended to
+/// its system_prompt. The frontend's ChatPanel detects the markers in any
+/// assistant reply and renders inline Approve / Deny buttons instead of
+/// just text.
+///
+/// We keep the markers ASCII and easy for the model to type verbatim. The
+/// description body is free-form; commands inside ```bash``` blocks render
+/// in a code box.
+export const SAFETY_PROTOCOL = `
+
+USER APPROVAL PROTOCOL — IMPORTANT:
+Before performing any destructive or external-effect operation, you MUST pause
+and ask the user for approval first. Examples that require approval:
+  - git commit / git push / git reset --hard / branch deletion
+  - removing or overwriting files outside the current task scope
+  - installing/uninstalling packages or system dependencies
+  - any deployment, publish, or remote API call that changes external state
+  - sending emails, posting to chat/Slack, or any irreversible action
+
+To request approval, output EXACTLY this block on its own (you may include any
+text before or after it; do NOT execute the commands until you receive
+explicit "approved" back):
+
+<<PROPOSAL>>
+<short prose: what you want to do and why>
+
+\`\`\`bash
+<the exact command(s) you will run>
+\`\`\`
+<<END_PROPOSAL>>
+
+Then STOP. Wait for the user (or a teammate) to reply with "approved" or
+"denied: <reason>". On "approved" — proceed. On "denied" — do not run the
+command; ask follow-up questions or revise the proposal.
+
+Read-only operations (reading files, listing directories, running tests,
+querying state) do NOT require a proposal. Use them freely.`;
+

@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import {
-  X, Bot, Terminal as TerminalIcon, ShieldAlert, AtSign, Save, Trash2,
+  X, Bot, Terminal as TerminalIcon, ShieldAlert, AtSign, Save, Trash2, ShieldCheck,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { useStore } from "../store";
 import { cn } from "../lib/cn";
 import type { CustomPreset, VendorInfo } from "../types";
-import { PRESETS, GROUP_ORDER, GROUP_COLOR } from "../lib/presets";
+import { PRESETS, GROUP_ORDER, GROUP_COLOR, SAFETY_PROTOCOL } from "../lib/presets";
 
 
 interface Props {
@@ -33,6 +33,7 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [skipPerms, setSkipPerms] = useState(false);
   const [allowMentions, setAllowMentions] = useState(true); // teamwork is the whole point — default on
   const [allowlist, setAllowlist] = useState(""); // comma-separated names; empty = any
+  const [requireApproval, setRequireApproval] = useState(true);
 
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
 
@@ -90,11 +91,18 @@ export function SpawnDialog({ open, onClose }: Props) {
     setError(null);
     try {
       if (tab === "agent") {
+        // Append the user-approval protocol when require_approval is on.
+        // The chat panel detects <<PROPOSAL>>...<<END_PROPOSAL>> blocks and
+        // renders inline Approve / Deny buttons that reply on the user's behalf.
+        const finalPrompt =
+          (systemPrompt.trim() || "") +
+          (requireApproval ? SAFETY_PROTOCOL : "");
+
         const snap = await api.spawnAgent({
           name: name.trim(),
           role: role.trim() || "Agent",
           cwd: cwd.trim(),
-          system_prompt: systemPrompt.trim() || null,
+          system_prompt: finalPrompt || null,
           model: null,
           color: null,
           vendor: "claude",
@@ -302,12 +310,20 @@ export function SpawnDialog({ open, onClose }: Props) {
               )}
 
               <Toggle
+                checked={requireApproval}
+                onChange={setRequireApproval}
+                icon={<ShieldCheck size={12} />}
+                label="Require user approval for destructive ops"
+                hint="Adds an instruction so the agent emits <<PROPOSAL>>...<<END_PROPOSAL>> blocks before any commit / push / delete / deploy / external call. The chat panel renders an inline Approve/Deny card; clicking sends the response back to the agent. Recommended for any setup that has skip-permissions ON."
+              />
+
+              <Toggle
                 checked={skipPerms}
                 onChange={setSkipPerms}
                 icon={<ShieldAlert size={12} />}
                 danger
                 label="Pass --dangerously-skip-permissions"
-                hint="DANGER: agent can run any tool (Bash, Edit, Write) without prompting. Combined with @mentions, a prompt-injected agent could instruct other agents to execute commands. Only enable for trusted local work."
+                hint="DANGER: agent can run any tool (Bash, Edit, Write) without prompting. Combined with @mentions, a prompt-injected agent could instruct other agents to execute commands. Only enable for trusted local work — and pair with 'Require approval' above."
               />
             </div>
           )}

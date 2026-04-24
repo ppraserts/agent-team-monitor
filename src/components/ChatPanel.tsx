@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
 import { findPreset, PRESETS } from "../lib/presets";
 import { compactAgent } from "../lib/compact";
+import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
 import type { ChatMessage } from "../types";
 
@@ -400,6 +401,7 @@ Available presets: ${presetList}`,
           <MessageBubble
             key={m.id}
             msg={m}
+            agentId={agentId}
             fromAgentName={
               m.from_agent_id ? agentsById[m.from_agent_id]?.spec.name : undefined
             }
@@ -530,9 +532,11 @@ Available presets: ${presetList}`,
 
 function MessageBubble({
   msg,
+  agentId,
   fromAgentName,
 }: {
   msg: ChatMessage;
+  agentId: string;
   fromAgentName?: string;
 }) {
   const ageSec = (Date.now() - +new Date(msg.ts)) / 1000;
@@ -549,6 +553,10 @@ function MessageBubble({
       </div>
     );
   }
+
+  // Detect <<PROPOSAL>>...<<END_PROPOSAL>> blocks in assistant text.
+  // Render them as inline approval cards INSTEAD of the raw markers.
+  const proposals = msg.role === "assistant" ? parseProposals(msg.content) : [];
   if (msg.role === "tool") {
     return (
       <div className="flex items-start gap-2 text-[11px] text-base-500 font-mono pl-2 border-l-2 border-(--color-accent-amber)/30">
@@ -565,6 +573,8 @@ function MessageBubble({
 
   const isUser = msg.role === "user";
   const isRouted = !!fromAgentName;
+  // For assistant messages with proposals, hide the raw markers from the bubble.
+  const displayContent = proposals.length > 0 ? stripProposals(msg.content) : msg.content;
 
   return (
     <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
@@ -575,27 +585,166 @@ function MessageBubble({
           <ArrowRight size={10} />
         </div>
       )}
-      <div
-        className={cn(
-          "max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words transition",
-          isUser
-            ? isRouted
-              ? cn(
-                  "bg-(--color-accent-violet)/15 border border-(--color-accent-violet)/30",
-                  fresh && "glow-violet border-(--color-accent-violet)/60",
-                )
-              : "bg-(--color-accent-cyan)/10 border border-(--color-accent-cyan)/25"
-            : cn(
-                "bg-base-800/60 border border-base-700/60",
-                fresh && "border-(--color-accent-cyan)/40",
-              ),
-        )}
-      >
-        {msg.content}
-      </div>
+      {displayContent.length > 0 && (
+        <div
+          className={cn(
+            "max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words transition",
+            isUser
+              ? isRouted
+                ? cn(
+                    "bg-(--color-accent-violet)/15 border border-(--color-accent-violet)/30",
+                    fresh && "glow-violet border-(--color-accent-violet)/60",
+                  )
+                : "bg-(--color-accent-cyan)/10 border border-(--color-accent-cyan)/25"
+              : cn(
+                  "bg-base-800/60 border border-base-700/60",
+                  fresh && "border-(--color-accent-cyan)/40",
+                ),
+          )}
+        >
+          {displayContent}
+        </div>
+      )}
+      {/* Approval cards (one per proposal in this message) */}
+      {proposals.map((p) => (
+        <ApprovalCard
+          key={p.index}
+          msgId={msg.id}
+          proposal={p}
+          agentId={agentId}
+        />
+      ))}
       <div className="text-[9px] text-base-600 mt-0.5 font-mono">
         {new Date(msg.ts).toLocaleTimeString()}
       </div>
+    </div>
+  );
+}
+
+function ApprovalCard({
+  msgId, proposal, agentId,
+}: {
+  msgId: string;
+  proposal: ReturnType<typeof parseProposals>[number];
+  agentId: string;
+}) {
+  const key = decisionKey(msgId, proposal.index);
+  const decision = useStore((s) => s.proposalDecisions[key]);
+  const recordDecision = useStore((s) => s.recordDecision);
+  const [denyReason, setDenyReason] = useState("");
+  const [denying, setDenying] = useState(false);
+
+  const { description, command } = useMemo(
+    () => splitProposalBody(proposal.body),
+    [proposal.body],
+  );
+
+  const send = async (text: string) => {
+    try {
+      await api.sendAgent(agentId, text);
+    } catch (e) {
+      console.error("approval send failed", e);
+    }
+  };
+
+  const onApprove = async () => {
+    recordDecision(key, "approved");
+    await send("approved");
+  };
+  const onDeny = async () => {
+    if (denying && !denyReason.trim()) {
+      // Asked for reason but blank — fall back to generic deny.
+    }
+    const text = denyReason.trim()
+      ? `denied: ${denyReason.trim()}`
+      : "denied";
+    recordDecision(key, "denied");
+    setDenying(false);
+    setDenyReason("");
+    await send(text);
+  };
+
+  // Already decided — render compact summary with timestamp.
+  if (decision) {
+    const ok = decision.decision === "approved";
+    return (
+      <div
+        className={cn(
+          "max-w-[85%] mt-1 rounded-md px-3 py-1.5 text-[11px] font-mono flex items-center gap-2 border",
+          ok
+            ? "bg-(--color-accent-green)/10 border-(--color-accent-green)/30 text-(--color-accent-green)"
+            : "bg-(--color-accent-red)/10 border-(--color-accent-red)/30 text-(--color-accent-red)",
+        )}
+      >
+        {ok ? <ShieldCheck size={12} /> : <ShieldX size={12} />}
+        Proposal {ok ? "approved" : "denied"} at{" "}
+        {new Date(decision.ts).toLocaleTimeString()}
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-[85%] mt-1 rounded-md border border-(--color-accent-amber)/40 bg-(--color-accent-amber)/5 overflow-hidden">
+      <div className="px-3 py-1.5 border-b border-(--color-accent-amber)/30 flex items-center gap-2 text-[11px]">
+        <span className="text-(--color-accent-amber) font-semibold flex items-center gap-1.5">
+          <ShieldCheck size={12} /> Awaiting your approval
+        </span>
+      </div>
+      {description && (
+        <div className="px-3 py-2 text-sm whitespace-pre-wrap text-base-200">
+          {description}
+        </div>
+      )}
+      {command && (
+        <pre className="mx-3 mb-2 rounded bg-base-950 border border-base-700/60 px-2 py-1.5 text-[11px] font-mono text-(--color-accent-amber) overflow-x-auto">
+          {command}
+        </pre>
+      )}
+      {denying ? (
+        <div className="p-2 border-t border-(--color-accent-amber)/30 space-y-1.5">
+          <input
+            type="text"
+            value={denyReason}
+            onChange={(e) => setDenyReason(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onDeny();
+              if (e.key === "Escape") setDenying(false);
+            }}
+            autoFocus
+            placeholder="Reason (optional) — sent back to the agent"
+            className="w-full bg-base-950 border border-base-700 rounded px-2 py-1 text-xs outline-none focus:border-(--color-accent-red)/50"
+          />
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => setDenying(false)}
+              className="px-2 py-1 text-[11px] rounded text-base-400 hover:bg-base-800/60"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onDeny}
+              className="px-2 py-1 text-[11px] rounded bg-(--color-accent-red)/20 hover:bg-(--color-accent-red)/30 border border-(--color-accent-red)/40 text-(--color-accent-red) flex items-center gap-1"
+            >
+              <ShieldX size={11} /> Send deny
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="p-2 border-t border-(--color-accent-amber)/30 flex justify-end gap-2">
+          <button
+            onClick={() => setDenying(true)}
+            className="px-2 py-1 text-xs rounded text-(--color-accent-red) hover:bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 flex items-center gap-1"
+          >
+            <ShieldX size={12} /> Deny
+          </button>
+          <button
+            onClick={onApprove}
+            className="px-3 py-1 text-xs rounded bg-(--color-accent-green)/20 hover:bg-(--color-accent-green)/30 border border-(--color-accent-green)/50 text-(--color-accent-green) flex items-center gap-1"
+          >
+            <ShieldCheck size={12} /> Approve
+          </button>
+        </div>
+      )}
     </div>
   );
 }

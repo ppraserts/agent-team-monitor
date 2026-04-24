@@ -23,6 +23,10 @@ interface State {
   activeTileId: string | null; // agent or pty id
   layout: string[]; // ordered list of ids displayed in tile grid
 
+  /// Decisions on approval proposals keyed by `${messageId}#${proposalIndex}`.
+  /// Lives in-memory only — a new spawn / refresh clears them.
+  proposalDecisions: Record<string, { decision: "approved" | "denied"; ts: string }>;
+
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
   setHomeDir: (h: string | null) => void;
@@ -39,6 +43,8 @@ interface State {
   setActive: (id: string | null) => void;
   toggleInLayout: (id: string) => void;
   removeFromLayout: (id: string) => void;
+
+  recordDecision: (key: string, decision: "approved" | "denied") => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -48,6 +54,7 @@ export const useStore = create<State>((set) => ({
   homeDir: null,
   activeTileId: null,
   layout: [],
+  proposalDecisions: {},
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
@@ -156,4 +163,12 @@ export const useStore = create<State>((set) => ({
     })),
   removeFromLayout: (id) =>
     set((s) => ({ layout: s.layout.filter((x) => x !== id) })),
+
+  recordDecision: (key, decision) =>
+    set((s) => ({
+      proposalDecisions: {
+        ...s.proposalDecisions,
+        [key]: { decision, ts: new Date().toISOString() },
+      },
+    })),
 }));
