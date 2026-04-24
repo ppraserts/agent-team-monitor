@@ -1,33 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, Zap, Calendar, Clock, AlertCircle, Settings as Cog, Info } from "lucide-react";
+import { RefreshCw, Zap, Info, ExternalLink } from "lucide-react";
 import { api } from "../lib/api";
-import { cn, fmtCost, fmtNumber } from "../lib/cn";
-import type { CcusagePeriodEntry, CcusageReport, UsageStats } from "../types";
+import { cn, fmtCost } from "../lib/cn";
+import {
+  DEFAULT_PLAN_SETTINGS,
+  describeWeeklyReset,
+  parsePlanSettings,
+  timeUntilWeeklyReset,
+  type PlanSettings,
+} from "../lib/planLimits";
+import type { CcusagePeriodEntry, CcusageReport } from "../types";
 
-interface Props {
-  /// Optional: max-token thresholds for the progress bars (used to render
-  /// "% of plan" if the user has set their plan tier in settings).
-  weeklyLimitTokens?: number;
-}
-
-export function UsagePanel({ weeklyLimitTokens }: Props) {
+export function UsagePanel() {
   const [report, setReport] = useState<CcusageReport | null>(null);
-  const [stats, setStats] = useState<UsageStats | null>(null);
+  const [plan, setPlan] = useState<PlanSettings>(DEFAULT_PLAN_SETTINGS);
   const [loading, setLoading] = useState(false);
-  const [lastFetched, setLastFetched] = useState<number | null>(null);
+  const [, setTick] = useState(0);
 
   const refresh = async () => {
     setLoading(true);
     try {
       const [r, s] = await Promise.all([
         api.ccusageReport(),
-        api.usageStats(),
+        api.settingsGetAll(),
       ]);
       setReport(r);
-      setStats(s);
-      setLastFetched(Date.now());
+      setPlan(parsePlanSettings(s));
     } catch (e) {
-      console.error("usage refresh failed", e);
+      console.error(e);
     } finally {
       setLoading(false);
     }
@@ -36,27 +36,51 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 60_000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const tt = setInterval(() => setTick((x) => x + 1), 30_000); // for "resets in" text
+    return () => {
+      clearInterval(t);
+      clearInterval(tt);
+    };
   }, []);
 
-  const today = useMemo(
-    () => latestByKey(report?.daily?.daily ?? [], "date"),
-    [report],
-  );
+  // Latest current week / current 5-hour block from ccusage.
   const thisWeek = useMemo(
-    () => latestByKey(report?.weekly?.weekly ?? [], "week"),
+    () => latest(report?.weekly?.weekly ?? [], "week"),
     [report],
   );
-  const thisMonth = useMemo(
-    () => latestByKey(report?.monthly?.monthly ?? [], "month"),
-    [report],
-  );
-
   const currentBlock = useMemo(() => {
     const arr = report?.blocks?.blocks ?? [];
-    return arr.find((b) => b.isActive) ?? null;
+    return (arr.find((b) => b.isActive) ?? null) as any;
   }, [report]);
+
+  // Per-model token tallies from this week.
+  const sonnetTokens = useMemo(
+    () => modelTokensForWeek(thisWeek, /sonnet/i),
+    [thisWeek],
+  );
+  const opusTokens = useMemo(() => modelTokensForWeek(thisWeek, /opus/i), [thisWeek]);
+  const haikuTokens = useMemo(() => modelTokensForWeek(thisWeek, /haiku/i), [thisWeek]);
+  const allTokens = useMemo(
+    () => (thisWeek ? thisWeek.inputTokens + thisWeek.outputTokens : 0),
+    [thisWeek],
+  );
+
+  // Current session (5-hour block)
+  const sessionTokens = currentBlock?.totalTokens ?? 0;
+  const sessionEnd = currentBlock?.endTime
+    ? new Date(currentBlock.endTime as string)
+    : null;
+  const sessionRemaining = useMemo(() => {
+    if (!sessionEnd) return null;
+    const ms = +sessionEnd - Date.now();
+    if (ms <= 0) return null;
+    const h = Math.floor(ms / (3600 * 1000));
+    const m = Math.floor((ms / 60_000) % 60);
+    return `${h} hr ${m} min`;
+  }, [sessionEnd, report]);
+
+  const resetText = describeWeeklyReset(plan.weeklyResetDay, plan.weeklyResetHour);
+  const resetCountdown = timeUntilWeeklyReset(plan.weeklyResetDay, plan.weeklyResetHour);
 
   return (
     <div className="flex flex-col h-full bg-base-900/40 border border-base-800 rounded-lg overflow-hidden">
@@ -66,10 +90,7 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
         <div className="flex-1">
           <div className="text-sm font-semibold">Claude Usage</div>
           <div className="text-[10px] text-base-500">
-            from ~/.claude/projects · ccusage{" "}
-            {lastFetched && (
-              <span>· updated {Math.floor((Date.now() - lastFetched) / 1000)}s ago</span>
-            )}
+            mirrors claude.ai/settings/limits · ccusage local data
           </div>
         </div>
         <button
@@ -82,86 +103,116 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
         </button>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-4">
-        {report?.error && (
-          <div className="rounded-md border border-(--color-accent-red)/40 bg-(--color-accent-red)/10 p-2 text-xs text-(--color-accent-red) flex items-start gap-2">
-            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 text-sm">
+        {/* ===== PLAN USAGE LIMITS ===== */}
+        <Section
+          title="Plan usage limits"
+          aside={<span className="text-base-400 text-xs">{plan.label}</span>}
+        >
+          <UsageRow
+            label="Current session"
+            sublabel={
+              sessionTokens > 0
+                ? `Resets in ${sessionRemaining ?? "—"}`
+                : "Starts when a message is sent"
+            }
+            used={sessionTokens}
+            limit={plan.sessionLimit}
+          />
+        </Section>
+
+        {/* ===== WEEKLY LIMITS ===== */}
+        <Section
+          title="Weekly limits"
+          aside={
+            <a
+              href="https://support.anthropic.com"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-(--color-accent-cyan) hover:underline flex items-center gap-1"
+            >
+              Learn more <ExternalLink size={10} />
+            </a>
+          }
+        >
+          <UsageRow
+            label="All models"
+            sublabel={`Resets ${resetText} (${resetCountdown})`}
+            used={allTokens}
+            limit={plan.weeklyAllLimit}
+          />
+          <UsageRow
+            label="Sonnet only"
+            sublabel={`Resets ${resetText}`}
+            used={sonnetTokens}
+            limit={plan.weeklySonnetLimit}
+          />
+          <UsageRow
+            label="Opus only"
+            sublabel={`Resets ${resetText}`}
+            used={opusTokens}
+            limit={plan.weeklyOpusLimit}
+          />
+          {haikuTokens > 0 && (
+            <UsageRow
+              label="Haiku (info)"
+              sublabel="Not metered separately by Anthropic"
+              used={haikuTokens}
+              limit={0}
+            />
+          )}
+        </Section>
+
+        {/* ===== EXTRA USAGE ===== */}
+        <Section title="Extra usage">
+          <div className="text-[11px] text-base-500 mb-2 leading-relaxed">
+            Anthropic's "extra usage" $ values are not in local files. Enter
+            them once in Settings → Plan to mirror your claude.ai page.
+          </div>
+          <UsageRow
+            label={`$${plan.extraSpent.toFixed(2)} spent`}
+            sublabel={
+              plan.extraResetDate ? `Resets ${plan.extraResetDate}` : "Set reset date in Settings"
+            }
+            used={plan.extraSpent}
+            limit={plan.monthlySpendLimit}
+            unit="dollar"
+          />
+          <div className="grid grid-cols-[200px_1fr_60px] items-center gap-3 py-2">
             <div>
-              <div className="font-semibold">Couldn't run ccusage</div>
-              <div className="text-[10px] mt-0.5 font-mono">{report.error}</div>
-              <div className="text-[10px] mt-1 text-base-400">
-                Make sure Node.js is installed (we run <code>npx ccusage</code>).
-              </div>
+              <div className="text-sm font-medium">${plan.monthlySpendLimit}</div>
+              <div className="text-xs text-base-500">Monthly spend limit</div>
+            </div>
+            <div />
+            <div className="text-right">
+              <a
+                href="#settings"
+                className="text-[11px] text-base-400 hover:text-(--color-accent-cyan) underline"
+              >
+                Adjust
+              </a>
             </div>
           </div>
-        )}
+        </Section>
 
-        {/* Current 5-hour block */}
-        {currentBlock && (
-          <Section icon={<Clock size={12} />} title="Current 5-hour block">
-            <BlockCard block={currentBlock} />
-          </Section>
-        )}
-
-        {/* Today */}
-        {today && (
-          <Section icon={<Calendar size={12} />} title={`Today (${today.date})`}>
-            <PeriodCard entry={today} />
-          </Section>
-        )}
-
-        {/* This week */}
-        {thisWeek && (
-          <Section
-            icon={<Calendar size={12} />}
-            title={`This week (from ${thisWeek.week})`}
-          >
-            <PeriodCard entry={thisWeek} limitTokens={weeklyLimitTokens} />
-          </Section>
-        )}
-
-        {/* This month */}
-        {thisMonth && (
-          <Section
-            icon={<Calendar size={12} />}
-            title={`This month (${thisMonth.month})`}
-          >
-            <PeriodCard entry={thisMonth} />
-          </Section>
-        )}
-
-        {/* In-app history (our own SQLite) */}
-        {stats && (
-          <Section icon={<Cog size={12} />} title="This app's contribution">
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <KV k="Today (in)" v={fmtNumber(stats.today_input_tokens)} />
-              <KV k="Today (out)" v={fmtNumber(stats.today_output_tokens)} />
-              <KV k="Today cost" v={fmtCost(stats.today_cost_usd)} />
-              <KV k="All-time cost" v={fmtCost(stats.total_cost_usd)} />
-              <KV k="Total turns" v={stats.total_turns.toString()} />
-              <KV k="Total agents" v={stats.total_agents.toString()} />
-            </div>
-          </Section>
-        )}
-
-        <div className="text-[10px] text-base-500 leading-relaxed border-t border-base-800 pt-3 mt-2 space-y-1.5">
+        {/* Footer note */}
+        <div className="text-[10px] text-base-500 leading-relaxed border-t border-base-800 pt-3 space-y-1.5">
           <div className="flex items-start gap-1.5">
             <Info size={10} className="mt-0.5 shrink-0 text-(--color-accent-cyan)" />
             <div>
-              <span className="text-base-300 font-semibold">Cost = API-equivalent.</span>{" "}
-              ccusage prices every token at Anthropic's <em>public API rate</em>.
-              On Pro / Max plans you pay a flat subscription, so this is NOT what
-              your card will be charged — it's a useful proxy for "how much
-              Claude work you'd be paying for if you were on pure API billing."
-            </div>
-          </div>
-          <div className="flex items-start gap-1.5">
-            <Info size={10} className="mt-0.5 shrink-0 text-(--color-accent-cyan)" />
-            <div>
-              Numbers cover <span className="text-base-300 font-semibold">ALL Claude CLI usage</span>{" "}
-              on this machine (anything that wrote to <code className="text-[9px]">~/.claude/projects/*.jsonl</code>),
-              not just agents spawned from this app.
+              Token totals come from local <code>~/.claude/projects/*.jsonl</code>{" "}
+              via ccusage. Plan limit values are configurable in{" "}
+              <span className="text-base-300 font-semibold">Settings → Plan</span>{" "}
+              — copy them from your{" "}
+              <a
+                href="https://claude.ai/settings/limits"
+                target="_blank"
+                rel="noreferrer"
+                className="text-(--color-accent-cyan) underline"
+              >
+                claude.ai usage page
+              </a>{" "}
+              for exact-match bars.
             </div>
           </div>
         </div>
@@ -171,147 +222,76 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
 }
 
 function Section({
-  icon, title, children,
-}: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
+  title, aside, children,
+}: { title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section>
-      <div className="text-[10px] tracking-wider text-base-400 uppercase mb-1.5 flex items-center gap-1.5">
-        {icon} {title}
+      <div className="flex items-baseline justify-between mb-2 pb-2 border-b border-base-800">
+        <h3 className="text-sm font-semibold text-base-200">{title}</h3>
+        {aside}
       </div>
-      {children}
+      <div>{children}</div>
     </section>
   );
 }
 
-function PeriodCard({
-  entry, limitTokens,
+function UsageRow({
+  label, sublabel, used, limit, unit,
 }: {
-  entry: CcusagePeriodEntry;
-  limitTokens?: number;
+  label: string;
+  sublabel: string;
+  used: number;
+  limit: number;
+  unit?: "dollar";
 }) {
-  const totalNonCache = entry.inputTokens + entry.outputTokens;
-  const pct = limitTokens ? Math.min(100, (totalNonCache / limitTokens) * 100) : null;
+  const pct = limit > 0 ? (used / limit) * 100 : 0;
+  const cappedPct = Math.min(100, pct);
+  const over = pct > 100;
   return (
-    <div className="rounded-md border border-base-700/40 bg-base-800/40 p-2 space-y-2">
-      <div className="flex items-baseline gap-3 text-xs flex-wrap">
-        <span className="text-(--color-accent-cyan) font-mono">↓ {fmtNumber(entry.inputTokens)}</span>
-        <span className="text-(--color-accent-violet) font-mono">↑ {fmtNumber(entry.outputTokens)}</span>
-        <span className="text-base-500 font-mono">cache {fmtNumber(entry.cacheReadTokens)}</span>
-        <span
-          className="ml-auto text-(--color-accent-amber) font-mono font-semibold"
-          title="API-equivalent cost — see note at the bottom"
-        >
-          ≈ {fmtCost(entry.totalCost)}
-        </span>
+    <div className="grid grid-cols-[160px_1fr_70px] items-center gap-3 py-2.5">
+      <div>
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-[11px] text-base-500">{sublabel}</div>
       </div>
-      {pct !== null && (
-        <div>
-          <div className="flex items-baseline justify-between text-[10px] mb-0.5">
-            <span className="text-base-500">vs your weekly limit ({fmtNumber(limitTokens!)} tok)</span>
-            <span className={cn("font-mono", pct > 90 ? "text-(--color-accent-red)" : "text-base-400")}>
-              {pct.toFixed(1)}%
-            </span>
-          </div>
-          <div className="h-2 rounded-full bg-base-900 overflow-hidden">
-            <div
-              className={cn(
-                "h-full rounded-full transition-all",
-                pct > 90 ? "bg-(--color-accent-red)" : "bg-(--color-accent-cyan)",
-              )}
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-        </div>
-      )}
-      {entry.modelBreakdowns.length > 0 && (
-        <div className="space-y-1 pt-1 border-t border-base-700/40">
-          {entry.modelBreakdowns.map((m) => (
-            <ModelBar key={m.modelName} m={m} totalCost={entry.totalCost} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ModelBar({
-  m, totalCost,
-}: {
-  m: CcusagePeriodEntry["modelBreakdowns"][number];
-  totalCost: number;
-}) {
-  const pct = totalCost > 0 ? (m.cost / totalCost) * 100 : 0;
-  const short = shortModel(m.modelName);
-  const color = modelColor(m.modelName);
-  return (
-    <div>
-      <div className="flex items-baseline justify-between text-[10px] font-mono mb-0.5">
-        <span style={{ color }}>{short}</span>
-        <span className="text-base-500">
-          {fmtNumber(m.inputTokens + m.outputTokens)} tok · {fmtCost(m.cost)}
-        </span>
+      <div className="h-2 bg-base-800 rounded-full overflow-hidden relative">
+        {limit > 0 ? (
+          <div
+            className={cn(
+              "h-full rounded-full transition-all",
+              over ? "bg-(--color-accent-cyan)" : "bg-(--color-accent-cyan)",
+            )}
+            style={{ width: `${cappedPct}%` }}
+          />
+        ) : (
+          <div className="h-full w-full bg-base-700/30 [background:repeating-linear-gradient(45deg,transparent,transparent_4px,rgba(255,255,255,0.05)_4px,rgba(255,255,255,0.05)_8px)]" />
+        )}
       </div>
-      <div className="h-1.5 rounded-full bg-base-900 overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all"
-          style={{ width: `${pct}%`, background: color }}
-        />
+      <div className="text-right text-xs font-mono">
+        {limit > 0 ? (
+          <span className={cn(over ? "text-(--color-accent-red)" : "text-base-400")}>
+            {Math.round(pct)}% used
+          </span>
+        ) : unit === "dollar" ? (
+          <span className="text-base-500">{fmtCost(used)}</span>
+        ) : (
+          <span className="text-base-500">no limit set</span>
+        )}
       </div>
     </div>
   );
 }
 
-function BlockCard({ block }: { block: any }) {
-  const start = block.startTime ? new Date(block.startTime) : null;
-  const end = block.endTime ? new Date(block.endTime) : null;
-  const now = new Date();
-  const remainingMs = end ? +end - +now : 0;
-  const elapsedMs = start ? +now - +start : 0;
-  const blockMs = 5 * 60 * 60 * 1000;
-  const elapsedPct = Math.min(100, Math.max(0, (elapsedMs / blockMs) * 100));
-
-  return (
-    <div className="rounded-md border border-(--color-accent-cyan)/30 bg-(--color-accent-cyan)/5 p-2 space-y-2">
-      <div className="flex items-baseline justify-between text-xs">
-        <span className="font-mono text-(--color-accent-cyan)">
-          {start ? start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
-          {" → "}
-          {end ? end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
-        </span>
-        <span className="font-mono text-(--color-accent-amber)">
-          {fmtCost(Number(block.totalCost ?? 0))}
-        </span>
-      </div>
-      <div className="h-1.5 rounded-full bg-base-900 overflow-hidden">
-        <div
-          className="h-full rounded-full bg-(--color-accent-cyan) transition-all"
-          style={{ width: `${elapsedPct}%` }}
-        />
-      </div>
-      <div className="flex justify-between text-[10px] text-base-500 font-mono">
-        <span>{fmtNumber(Number(block.totalTokens ?? 0))} tokens used</span>
-        <span>
-          {remainingMs > 0
-            ? `${Math.floor(remainingMs / 60000)}m left`
-            : "block ending"}
-        </span>
-      </div>
-    </div>
-  );
+function modelTokensForWeek(
+  week: CcusagePeriodEntry | null,
+  pattern: RegExp,
+): number {
+  if (!week) return 0;
+  return week.modelBreakdowns
+    .filter((m) => pattern.test(m.modelName))
+    .reduce((acc, m) => acc + m.inputTokens + m.outputTokens, 0);
 }
 
-function KV({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="bg-base-800/40 border border-base-700/40 rounded-md px-2 py-1">
-      <div className="text-[9px] text-base-500">{k}</div>
-      <div className="text-sm font-mono font-semibold">{v}</div>
-    </div>
-  );
-}
-
-/// Take the entry with the largest value at `key` (latest period).
-/// Empty array → null.
-function latestByKey<K extends "date" | "week" | "month">(
+function latest<K extends "date" | "week" | "month">(
   arr: CcusagePeriodEntry[],
   key: K,
 ): CcusagePeriodEntry | null {
@@ -321,21 +301,4 @@ function latestByKey<K extends "date" | "week" | "month">(
     const bv = (b[key] as string | undefined) ?? "";
     return bv.localeCompare(av);
   })[0];
-}
-
-function shortModel(name: string): string {
-  // claude-opus-4-5-20251101 -> opus-4-5
-  // claude-haiku-4-5-20251001 -> haiku-4-5
-  // claude-sonnet-4-5-... -> sonnet-4-5
-  const m = name.match(/(opus|haiku|sonnet)-(\d+(?:[-.]\d+)*)/i);
-  if (m) return `${m[1]}-${m[2]}`;
-  return name.replace(/^claude-/, "");
-}
-
-function modelColor(name: string): string {
-  const lower = name.toLowerCase();
-  if (lower.includes("opus")) return "oklch(0.70 0.22 295)"; // violet
-  if (lower.includes("sonnet")) return "oklch(0.78 0.18 200)"; // cyan
-  if (lower.includes("haiku")) return "oklch(0.82 0.18 80)"; // amber
-  return "oklch(0.55 0.018 270)"; // grey
 }

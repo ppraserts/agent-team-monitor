@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink,
+  X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink, Zap,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost, fmtNumber } from "../lib/cn";
+import { PLAN_DEFAULTS, type PlanTier } from "../lib/planLimits";
 import type { UsageStats } from "../types";
 
 interface Props {
@@ -38,6 +39,18 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
 
+  // Plan / limits — mirror what claude.ai shows.
+  const [planTier, setPlanTier] = useState<PlanTier>("max-20x");
+  const [sessionLimit, setSessionLimit] = useState(PLAN_DEFAULTS["max-20x"].sessionLimit);
+  const [weeklyAll, setWeeklyAll] = useState(PLAN_DEFAULTS["max-20x"].weeklyAllLimit);
+  const [weeklySonnet, setWeeklySonnet] = useState(PLAN_DEFAULTS["max-20x"].weeklySonnetLimit);
+  const [weeklyOpus, setWeeklyOpus] = useState(PLAN_DEFAULTS["max-20x"].weeklyOpusLimit);
+  const [monthlySpend, setMonthlySpend] = useState(PLAN_DEFAULTS["max-20x"].monthlySpendLimit);
+  const [resetDay, setResetDay] = useState(5);
+  const [resetHour, setResetHour] = useState(7);
+  const [extraSpent, setExtraSpent] = useState(0);
+  const [extraResetDate, setExtraResetDate] = useState("");
+
   useEffect(() => {
     if (!open) return;
     Promise.all([
@@ -52,8 +65,40 @@ export function SettingsDialog({ open, onClose }: Props) {
       setStats(st);
       setDataPath(dp);
       applyTheme((s.theme as ThemeKey) || "cyan");
+
+      const tier = (s.plan_tier as PlanTier) || "max-20x";
+      const d = PLAN_DEFAULTS[tier] ?? PLAN_DEFAULTS["max-20x"];
+      setPlanTier(tier);
+      setSessionLimit(numOr(s.plan_session_limit, d.sessionLimit));
+      setWeeklyAll(numOr(s.plan_weekly_all_limit, d.weeklyAllLimit));
+      setWeeklySonnet(numOr(s.plan_weekly_sonnet_limit, d.weeklySonnetLimit));
+      setWeeklyOpus(numOr(s.plan_weekly_opus_limit, d.weeklyOpusLimit));
+      setMonthlySpend(numOr(s.plan_monthly_spend_limit, d.monthlySpendLimit));
+      setResetDay(numOr(s.plan_weekly_reset_day, 5));
+      setResetHour(numOr(s.plan_weekly_reset_hour, 7));
+      setExtraSpent(numOr(s.plan_extra_spent, 0));
+      setExtraResetDate(s.plan_extra_reset_date || "");
     }).catch(console.error);
   }, [open]);
+
+  const onTierChange = (t: PlanTier) => {
+    setPlanTier(t);
+    save("plan_tier", t);
+    if (t !== "custom") {
+      // Apply that tier's defaults (user can still override per-field).
+      const d = PLAN_DEFAULTS[t];
+      setSessionLimit(d.sessionLimit);
+      setWeeklyAll(d.weeklyAllLimit);
+      setWeeklySonnet(d.weeklySonnetLimit);
+      setWeeklyOpus(d.weeklyOpusLimit);
+      setMonthlySpend(d.monthlySpendLimit);
+      save("plan_session_limit", String(d.sessionLimit));
+      save("plan_weekly_all_limit", String(d.weeklyAllLimit));
+      save("plan_weekly_sonnet_limit", String(d.weeklySonnetLimit));
+      save("plan_weekly_opus_limit", String(d.weeklyOpusLimit));
+      save("plan_monthly_spend_limit", String(d.monthlySpendLimit));
+    }
+  };
 
   const save = async (key: string, value: string) => {
     try {
@@ -176,6 +221,97 @@ export function SettingsDialog({ open, onClose }: Props) {
             )}
           </Section>
 
+          {/* ----- Plan limits (mirrors claude.ai) ----- */}
+          <Section icon={<Zap size={12} />} title="Plan & limits (used by Usage panel)">
+            <Field label="Plan tier (selecting one applies its defaults — override below)">
+              <select
+                value={planTier}
+                onChange={(e) => onTierChange(e.target.value as PlanTier)}
+                className="input"
+              >
+                <option value="pro">Pro</option>
+                <option value="max-5x">Max (5x)</option>
+                <option value="max-20x">Max (20x)</option>
+                <option value="custom">Custom</option>
+              </select>
+            </Field>
+            <div className="text-[10px] text-base-500 -mt-1 mb-1">
+              Copy exact values from{" "}
+              <a
+                href="https://claude.ai/settings/limits"
+                target="_blank"
+                rel="noreferrer"
+                className="text-(--color-accent-cyan) underline"
+              >
+                claude.ai/settings/limits
+              </a>{" "}
+              for accurate %.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField
+                label="Session limit (tokens / 5h block)"
+                value={sessionLimit}
+                onChange={(v) => { setSessionLimit(v); save("plan_session_limit", String(v)); }}
+              />
+              <NumberField
+                label="Weekly: All models (tokens)"
+                value={weeklyAll}
+                onChange={(v) => { setWeeklyAll(v); save("plan_weekly_all_limit", String(v)); }}
+              />
+              <NumberField
+                label="Weekly: Sonnet only (tokens)"
+                value={weeklySonnet}
+                onChange={(v) => { setWeeklySonnet(v); save("plan_weekly_sonnet_limit", String(v)); }}
+              />
+              <NumberField
+                label="Weekly: Opus only (tokens)"
+                value={weeklyOpus}
+                onChange={(v) => { setWeeklyOpus(v); save("plan_weekly_opus_limit", String(v)); }}
+              />
+              <NumberField
+                label="Monthly extra-usage cap ($)"
+                value={monthlySpend}
+                onChange={(v) => { setMonthlySpend(v); save("plan_monthly_spend_limit", String(v)); }}
+              />
+              <Field label="Weekly reset day">
+                <select
+                  value={resetDay}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setResetDay(v); save("plan_weekly_reset_day", String(v));
+                  }}
+                  className="input"
+                >
+                  {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d, i) => (
+                    <option key={i} value={i}>{d}</option>
+                  ))}
+                </select>
+              </Field>
+              <NumberField
+                label="Weekly reset hour (0–23)"
+                value={resetHour}
+                onChange={(v) => { setResetHour(v); save("plan_weekly_reset_hour", String(v)); }}
+              />
+              <NumberField
+                label="Current extra usage spent ($)"
+                value={extraSpent}
+                step={0.01}
+                onChange={(v) => { setExtraSpent(v); save("plan_extra_spent", String(v)); }}
+              />
+              <Field label="Extra usage resets on (YYYY-MM-DD)">
+                <input
+                  type="date"
+                  value={extraResetDate}
+                  onChange={(e) => {
+                    setExtraResetDate(e.target.value);
+                    save("plan_extra_reset_date", e.target.value);
+                  }}
+                  className="input"
+                />
+              </Field>
+            </div>
+          </Section>
+
           {/* ----- Storage ----- */}
           <Section icon={<Database size={12} />} title="Storage">
             <div className="text-[10px] text-base-500 mb-1 uppercase tracking-wider">
@@ -267,6 +403,28 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+function NumberField({
+  label, value, onChange, step,
+}: { label: string; value: number; onChange: (v: number) => void; step?: number }) {
+  return (
+    <Field label={label}>
+      <input
+        type="number"
+        value={value}
+        step={step ?? 1}
+        onChange={(e) => onChange(Number(e.target.value) || 0)}
+        className="input font-mono text-xs"
+      />
+    </Field>
+  );
+}
+
+function numOr(s: string | undefined, fallback: number): number {
+  if (s == null || s === "") return fallback;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function ToggleRow({
