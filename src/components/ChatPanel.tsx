@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
@@ -545,7 +545,7 @@ Available presets: ${presetList}`,
   );
 }
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   msg,
   agentId,
   fromAgentName,
@@ -634,7 +634,7 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 function ApprovalCard({
   msgId, proposal, agentId,
