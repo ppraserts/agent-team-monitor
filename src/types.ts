@@ -149,3 +149,46 @@ export interface CustomPreset {
   group_name: string;
   system_prompt: string | null;
 }
+
+// ccusage JSON shapes (raw from `npx ccusage <kind> --json`).
+export interface CcusagePeriodEntry {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  totalCost: number;
+  modelsUsed: string[];
+  modelBreakdowns: {
+    modelName: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+    cost: number;
+  }[];
+}
+
+export interface CcusageBlockEntry {
+  startTime?: string;
+  endTime?: string;
+  isActive?: boolean;
+  totalTokens?: number;
+  totalCost?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+  modelsUsed?: string[];
+  // ccusage may include other fields; we accept anything.
+  [key: string]: unknown;
+}
+
+export interface CcusageReport {
+  daily: { daily: CcusagePeriodEntry[] } | null;
+  weekly: { weekly: CcusagePeriodEntry[] } | null;
+  monthly: { monthly: CcusagePeriodEntry[] } | null;
+  blocks: { blocks: CcusageBlockEntry[] } | null;
+  error: string | null;
+}

@@ -163,6 +163,69 @@ fn home_dir() -> Option<String> {
     dirs::home_dir().and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
+// ---------- ccusage: parse ~/.claude/projects/*.jsonl for global Claude usage ----------
+
+#[derive(Debug, Clone, Serialize)]
+struct CcusageReport {
+    /// Raw JSON from `npx ccusage <kind> --json`. Frontend renders specifics.
+    daily: Option<serde_json::Value>,
+    weekly: Option<serde_json::Value>,
+    monthly: Option<serde_json::Value>,
+    blocks: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn ccusage_report() -> Result<CcusageReport, String> {
+    let daily = run_ccusage(&["daily", "--json"]).await;
+    let weekly = run_ccusage(&["weekly", "--json"]).await;
+    let monthly = run_ccusage(&["monthly", "--json"]).await;
+    let blocks = run_ccusage(&["blocks", "--json"]).await;
+
+    let any_err = [&daily, &weekly, &monthly, &blocks]
+        .iter()
+        .find_map(|r| r.as_ref().err().cloned());
+
+    Ok(CcusageReport {
+        daily: daily.ok(),
+        weekly: weekly.ok(),
+        monthly: monthly.ok(),
+        blocks: blocks.ok(),
+        error: any_err,
+    })
+}
+
+async fn run_ccusage(args: &[&str]) -> Result<serde_json::Value, String> {
+    use tokio::process::Command;
+    #[cfg(windows)]
+    let program = "npx.cmd";
+    #[cfg(not(windows))]
+    let program = "npx";
+
+    let mut cmd = Command::new(program);
+    cmd.arg("--yes").arg("ccusage");
+    for a in args {
+        cmd.arg(a);
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let out = cmd.output().await.map_err(|e| format!("spawn npx ccusage failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ccusage exit {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("parse ccusage json failed: {e}; raw={}", stdout.chars().take(200).collect::<String>()))
+}
+
 // ---------- History / persistence commands ----------
 
 #[tauri::command]
@@ -262,6 +325,7 @@ pub fn run() {
             list_external_sessions,
             list_available_vendors,
             home_dir,
+            ccusage_report,
             history_list_agents,
             history_load_messages,
             history_delete_agent,

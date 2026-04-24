@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentSnapshot,
   AgentSpec,
+  CcusageReport,
   CustomPreset,
   ExternalSession,
   HistoryAgent,
@@ -76,4 +77,7 @@ export const api = {
   // Destructive
   dataClearAll: () => invoke<void>("data_clear_all"),
   dataPath: () => invoke<string>("data_path"),
+
+  // ccusage — global Claude usage from ~/.claude/projects/*.jsonl
+  ccusageReport: () => invoke<CcusageReport>("ccusage_report"),
 };

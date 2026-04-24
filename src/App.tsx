@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { LayoutGrid, Network, Eye } from "lucide-react";
+import { LayoutGrid, Network, Eye, Zap } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
@@ -8,12 +8,13 @@ import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
+import { UsagePanel } from "./components/UsagePanel";
 import { useStore } from "./store";
 import { api } from "./lib/api";
 import type { AgentEvent, HistoryAgent } from "./types";
 import { cn } from "./lib/cn";
 
-type RightPaneMode = "feed" | "graph" | "off";
+type RightPaneMode = "feed" | "graph" | "usage" | "off";
 
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -165,6 +166,12 @@ export default function App() {
               icon={<Network size={13} />}
               label="Graph"
             />
+            <ToolbarBtn
+              active={rightPane === "usage"}
+              onClick={() => setRightPane(rightPane === "usage" ? "off" : "usage")}
+              icon={<Zap size={13} />}
+              label="Usage"
+            />
           </div>
         </div>
 
@@ -199,7 +206,9 @@ export default function App() {
 
           {rightPane !== "off" && (
             <div className="w-96 shrink-0 border-l border-base-800 p-3 bg-base-950/40">
-              {rightPane === "feed" ? <TeamFeed /> : <AgentGraph mentionPulse={mentionPulse} />}
+              {rightPane === "feed" && <TeamFeed />}
+              {rightPane === "graph" && <AgentGraph mentionPulse={mentionPulse} />}
+              {rightPane === "usage" && <UsagePanel />}
             </div>
           )}
         </div>
