@@ -175,40 +175,41 @@ impl AgentManager {
         self.emit(AgentEvent::Created { snapshot: snap.clone() });
         self.set_status(&id, AgentStatus::Idle);
 
-        // Broadcast a brief roster update to every existing teammate so they
-        // learn about the new arrival even though their initial system prompt
-        // was a snapshot from before this spawn.
-        if !live_roster.is_empty() {
-            self.broadcast_team_update(&live_roster, &spec.name, &spec.role).await;
-        }
+        // NOTE: we deliberately do NOT broadcast a chat message to existing
+        // agents here. Doing so would force every existing agent to spend a
+        // turn (and tokens) acknowledging — that's O(n²) cost on a busy team.
+        // Instead, every user message piped to an agent gets the current
+        // roster prepended silently — see `current_roster_line` below.
 
         Ok(snap)
     }
 
-    async fn broadcast_team_update(
-        &self,
-        existing_names: &[String],
-        new_name: &str,
-        new_role: &str,
-    ) {
-        let notice = format!(
-            "[TEAM ROSTER UPDATE] A new teammate has joined: @{} — {}. \
-             You can now address them with @{}. \
-             (Acknowledge briefly only if you have something useful to say; \
-             otherwise just note it and wait for the user.)",
-            new_name, new_role, new_name,
-        );
-        for name in existing_names {
-            if let Some(id) = self.id_by_name(name) {
-                // Show a short, friendly version in the chat panel — full notice goes on stdin.
-                let display = format!("[team] @{} just joined the team.", new_name);
-                if let Err(e) = self
-                    .send_internal(&id, notice.clone(), Some(display), None)
-                    .await
-                {
-                    tracing::warn!("team update broadcast to {} failed: {}", name, e);
+    /// Build a small "[TEAM ROSTER]" header that's invisibly prepended to
+    /// every user message piped to an agent's stdin. The agent always sees
+    /// the live team — without us spending an extra turn per spawn to tell
+    /// it. The header is NOT shown in the UI (display_override keeps chat
+    /// bubbles clean).
+    fn current_roster_line(&self, viewer_id: &str) -> String {
+        let reg = self.registry.read();
+        let mut names: Vec<String> = reg
+            .by_id
+            .values()
+            .map(|h| {
+                if h.id == viewer_id {
+                    format!("@{} (you)", h.spec.name)
+                } else {
+                    format!("@{}", h.spec.name)
                 }
-            }
+            })
+            .collect();
+        names.sort();
+        if names.len() <= 1 {
+            String::new()
+        } else {
+            format!(
+                "[TEAM ROSTER NOW: {}] (silent system note; do not acknowledge — just use these exact names when addressing teammates)",
+                names.join(", "),
+            )
         }
     }
 
@@ -237,7 +238,17 @@ impl AgentManager {
             .cloned()
             .ok_or_else(|| anyhow!("agent {} not found", agent_id))?;
 
-        let line = (handle.encode_user)(&stdin_message);
+        // Prepend the current roster as a silent header so the agent always
+        // knows who's on the team RIGHT NOW (covers teammates spawned after
+        // this one — the system_prompt only had a snapshot at spawn time).
+        let roster_header = self.current_roster_line(agent_id);
+        let stdin_full = if roster_header.is_empty() {
+            stdin_message.clone()
+        } else {
+            format!("{}\n\n{}", roster_header, stdin_message)
+        };
+
+        let line = (handle.encode_user)(&stdin_full);
         handle.stdin_tx.send(line).await
             .context("failed to send to agent stdin")?;
 
