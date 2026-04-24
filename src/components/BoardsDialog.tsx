@@ -312,8 +312,9 @@ export function BoardsDialog({ open, onClose }: Props) {
     return pointerWithin(args);
   };
 
-  if (!open) return null;
-  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
+  // IMPORTANT: this useMemo must be ABOVE any early `return` (Rules of Hooks).
+  // When `!open` we still call the hook so React sees a stable hook order
+  // across renders.
   const cardsByColumn = useMemo(() => {
     const m = new Map<number, BoardCard[]>();
     for (const c of cards) {
@@ -326,6 +327,9 @@ export function BoardsDialog({ open, onClose }: Props) {
     }
     return m;
   }, [cards]);
+
+  if (!open) return null;
+  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-950/80 backdrop-blur-sm">
