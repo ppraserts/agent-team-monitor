@@ -32,8 +32,9 @@ import { cn } from "../lib/cn";
 import type { Board, BoardCard, BoardColumn } from "../types";
 
 interface Props {
-  open: boolean;
-  onClose: () => void;
+  /// Optional close handler — when provided, a small × button shows in the
+  /// header. Useful when this is hosted inside a collapsible split panel.
+  onClose?: () => void;
 }
 
 const COLUMN_PALETTE = [
@@ -41,7 +42,7 @@ const COLUMN_PALETTE = [
   "#ffd28a", "#ff8aa3", "#a8a8b3",
 ] as const;
 
-export function BoardsDialog({ open, onClose }: Props) {
+export function BoardsPanel({ onClose }: Props) {
   const [boards, setBoards] = useState<Board[]>([]);
   const [activeBoardId, setActiveBoardId] = useState<number | null>(null);
   const [columns, setColumns] = useState<BoardColumn[]>([]);
@@ -87,10 +88,9 @@ export function BoardsDialog({ open, onClose }: Props) {
   };
 
   useEffect(() => {
-    if (!open) return;
     refreshBoards();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
 
   useEffect(() => {
     if (activeBoardId != null) refreshBoard(activeBoardId);
@@ -388,22 +388,23 @@ export function BoardsDialog({ open, onClose }: Props) {
     return m;
   }, [cards]);
 
-  if (!open) return null;
   const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-950/80 backdrop-blur-sm">
-      <div className="glass rounded-xl w-[1280px] max-w-[97vw] h-[92vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="px-4 py-3 border-b border-base-800 flex items-center justify-between shrink-0">
-          <div className="text-sm font-semibold tracking-wide flex items-center gap-2">
-            <KanbanSquare size={14} className="text-(--color-accent-cyan)" />
-            BOARDS
-          </div>
-          <button onClick={onClose} className="text-base-500 hover:text-base-200">
-            <X size={16} />
-          </button>
+    <>
+    <div className="h-full w-full flex flex-col bg-base-950/40 border-t border-base-800">
+      {/* Header */}
+      <div className="px-3 py-1.5 border-b border-base-800 flex items-center justify-between shrink-0 bg-base-900/40">
+        <div className="text-[11px] font-semibold tracking-wide flex items-center gap-1.5 text-(--color-accent-cyan)">
+          <KanbanSquare size={12} />
+          BOARDS
         </div>
+        {onClose && (
+          <button onClick={onClose} className="text-base-500 hover:text-base-200" title="Hide board panel">
+            <X size={14} />
+          </button>
+        )}
+      </div>
 
         <div className="flex-1 flex min-h-0">
           {/* Boards list */}
@@ -515,29 +516,29 @@ export function BoardsDialog({ open, onClose }: Props) {
           </main>
         </div>
 
-        {error && (
-          <div className="mx-3 mb-2 p-2 rounded bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 text-[11px] text-(--color-accent-red)">
-            {error}
-          </div>
-        )}
-      </div>
-
-      {editingCard && (
-        <CardEditor
-          card={editingCard}
-          teamAgentNames={teamAgentNames}
-          isInLastColumn={
-            columns.length > 0 &&
-            editingCard.column_id === columns[columns.length - 1].id
-          }
-          onClose={() => setEditingCard(null)}
-          onSave={onSaveCard}
-          onDelete={() => onDeleteCard(editingCard.id)}
-          onSend={() => onSendCard(editingCard)}
-          onMarkDone={() => onMarkDone(editingCard)}
-        />
+      {error && (
+        <div className="mx-3 mb-2 p-2 rounded bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 text-[11px] text-(--color-accent-red)">
+          {error}
+        </div>
       )}
     </div>
+
+    {editingCard && (
+      <CardEditor
+        card={editingCard}
+        teamAgentNames={teamAgentNames}
+        isInLastColumn={
+          columns.length > 0 &&
+          editingCard.column_id === columns[columns.length - 1].id
+        }
+        onClose={() => setEditingCard(null)}
+        onSave={onSaveCard}
+        onDelete={() => onDeleteCard(editingCard.id)}
+        onSend={() => onSendCard(editingCard)}
+        onMarkDone={() => onMarkDone(editingCard)}
+      />
+    )}
+    </>
   );
 }
 

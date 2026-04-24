@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LayoutGrid, Network, Eye, Zap } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
@@ -6,7 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
-import { BoardsDialog } from "./components/BoardsDialog";
+import { BoardsPanel } from "./components/BoardsDialog";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
 import { UsagePanel } from "./components/UsagePanel";
@@ -24,7 +24,34 @@ export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [boardsOpen, setBoardsOpen] = useState(false);
+  /// 0..1 — fraction of the main vertical area allocated to the bottom
+  /// boards panel. Mid by default; user drags the divider to resize.
+  const [boardSplit, setBoardSplit] = useState(0.42);
   const [rightPane, setRightPane] = useState<RightPaneMode>("feed");
+
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = splitContainerRef.current;
+    if (!container) return;
+    const onMove = (m: MouseEvent) => {
+      const r = container.getBoundingClientRect();
+      // Divider Y as a fraction of container height — the BOTTOM panel
+      // size = 1 minus that. Clamp so neither half collapses entirely.
+      const topRatio = (m.clientY - r.top) / r.height;
+      setBoardSplit(Math.min(0.85, Math.max(0.15, 1 - topRatio)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
   const [mentionPulse, setMentionPulse] = useState<{ from: string; to: string; key: number } | null>(
     null,
   );
@@ -158,7 +185,7 @@ export default function App() {
       <Sidebar
         onSpawn={() => setSpawnOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
-        onOpenBoards={() => setBoardsOpen(true)}
+        onOpenBoards={() => setBoardsOpen((v) => !v)}
         onResume={onResume}
       />
 
@@ -191,31 +218,58 @@ export default function App() {
         </div>
 
         <div className="flex-1 flex min-h-0">
-          <div className="flex-1 min-w-0 p-3 overflow-auto">
-            {tiles.length === 0 ? (
-              <EmptyState onSpawn={() => setSpawnOpen(true)} />
-            ) : (
-              <div
-                className="grid gap-3 h-full"
-                style={{
-                  gridTemplateColumns: `repeat(${gridCols(tiles.length)}, minmax(0, 1fr))`,
-                  gridAutoRows: "minmax(0, 1fr)",
-                }}
-              >
-                {tiles.map((id) => (
-                  <div
-                    key={id}
-                    className="min-h-0 min-w-0"
-                    onClick={() => setActive(id)}
-                  >
-                    {agents[id] ? (
-                      <ChatPanel agentId={id} />
-                    ) : ptys[id] ? (
-                      <TerminalPanel ptyId={id} />
-                    ) : null}
-                  </div>
-                ))}
-              </div>
+          {/* Vertical split: agents (top) / boards (bottom) */}
+          <div ref={splitContainerRef} className="flex-1 min-w-0 flex flex-col">
+            <div
+              className="min-h-0 p-3 overflow-auto"
+              style={{
+                flex: boardsOpen ? `0 0 ${(1 - boardSplit) * 100}%` : "1 1 100%",
+              }}
+            >
+              {tiles.length === 0 ? (
+                <EmptyState onSpawn={() => setSpawnOpen(true)} />
+              ) : (
+                <div
+                  className="grid gap-3 h-full"
+                  style={{
+                    gridTemplateColumns: `repeat(${gridCols(tiles.length)}, minmax(0, 1fr))`,
+                    gridAutoRows: "minmax(0, 1fr)",
+                  }}
+                >
+                  {tiles.map((id) => (
+                    <div
+                      key={id}
+                      className="min-h-0 min-w-0"
+                      onClick={() => setActive(id)}
+                    >
+                      {agents[id] ? (
+                        <ChatPanel agentId={id} />
+                      ) : ptys[id] ? (
+                        <TerminalPanel ptyId={id} />
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {boardsOpen && (
+              <>
+                {/* Drag handle to resize the split */}
+                <div
+                  onMouseDown={startResize}
+                  className="h-1 shrink-0 cursor-row-resize bg-base-800 hover:bg-(--color-accent-cyan)/60 transition relative group"
+                  title="Drag to resize"
+                >
+                  <div className="absolute inset-x-0 -top-0.5 h-2" />
+                </div>
+                <div
+                  className="min-h-0"
+                  style={{ flex: `0 0 ${boardSplit * 100}%` }}
+                >
+                  <BoardsPanel onClose={() => setBoardsOpen(false)} />
+                </div>
+              </>
             )}
           </div>
 
@@ -231,7 +285,6 @@ export default function App() {
 
       <SpawnDialog open={spawnOpen} onClose={() => setSpawnOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <BoardsDialog open={boardsOpen} onClose={() => setBoardsOpen(false)} />
     </div>
   );
 }
