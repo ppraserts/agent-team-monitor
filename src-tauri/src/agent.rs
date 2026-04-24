@@ -69,6 +69,10 @@ pub struct AgentSnapshot {
     pub last_activity: DateTime<Utc>,
     pub usage: AgentUsage,
     pub message_count: u64,
+    /// Most recent turn's TOTAL input tokens (= input_tokens + cache_read +
+    /// cache_creation). Approximates the agent's current context size; used
+    /// for the context indicator + auto-compact threshold.
+    pub current_context_tokens: u64,
 }
 
 /// Events emitted to the frontend on the `agent://event` channel.

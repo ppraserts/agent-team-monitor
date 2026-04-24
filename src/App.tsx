@@ -11,8 +11,11 @@ import { AgentGraph } from "./components/AgentGraph";
 import { UsagePanel } from "./components/UsagePanel";
 import { useStore } from "./store";
 import { api } from "./lib/api";
+import { compactAgent } from "./lib/compact";
 import type { AgentEvent, HistoryAgent } from "./types";
 import { cn } from "./lib/cn";
+
+const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 type RightPaneMode = "feed" | "graph" | "usage" | "off";
 
@@ -76,6 +79,10 @@ export default function App() {
   // even if the effect's cleanup has already run. The `cancelled` flag handles
   // the race where cleanup fires BEFORE the promise resolves.
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  // Tracks which agent ids we're already auto-compacting, so a burst of
+  // result events doesn't fire compaction multiple times in parallel.
+  const autoCompactingRef = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     let cancelled = false;
     listen<AgentEvent>("agent://event", (e) => {
@@ -101,6 +108,8 @@ export default function App() {
           break;
         case "result":
           applyUsage(ev.agent_id, ev.usage);
+          // Fire-and-forget auto-compact check.
+          maybeAutoCompact(ev.agent_id, autoCompactingRef.current);
           break;
         case "mention":
           // to_agent_id is now resolved server-side — no FE store lookup needed.
@@ -265,4 +274,37 @@ function gridCols(n: number): number {
   if (n <= 4) return 2;
   if (n <= 9) return 3;
   return 4;
+}
+
+/// Fire-and-forget: when a result event arrives, peek at the agent's current
+/// context size and, if auto-compact is on AND we've crossed the threshold,
+/// kick off compaction. Guarded against concurrent runs per agent id.
+async function maybeAutoCompact(agentId: string, inflight: Set<string>) {
+  if (inflight.has(agentId)) return;
+  // Read settings — small enough to fetch each time; cached well by Tauri IPC.
+  let on = false;
+  let threshold = 85;
+  try {
+    const s = await api.settingsGetAll();
+    on = s.auto_compact === "true";
+    threshold = Number(s.auto_compact_threshold ?? "85") || 85;
+  } catch {
+    return;
+  }
+  if (!on) return;
+
+  const record = useStore.getState().agents[agentId];
+  if (!record) return;
+  const ctx = record.snapshot.current_context_tokens;
+  const pct = (ctx / DEFAULT_CONTEXT_WINDOW) * 100;
+  if (pct < threshold) return;
+
+  inflight.add(agentId);
+  try {
+    await compactAgent(agentId);
+  } catch (e) {
+    console.warn("auto-compact failed:", e);
+  } finally {
+    inflight.delete(agentId);
+  }
 }

@@ -37,6 +37,8 @@ struct AgentHandle {
     session_id: Arc<RwLock<Option<String>>>,
     usage: Arc<RwLock<AgentUsage>>,
     message_count: Arc<RwLock<u64>>,
+    /// Most recent turn's total input tokens (current context size).
+    current_context: Arc<RwLock<u64>>,
     stdin_tx: mpsc::Sender<String>,
     /// Encoder for outbound user messages (vendor-specific).
     encode_user: Arc<dyn Fn(&str) -> String + Send + Sync>,
@@ -148,6 +150,7 @@ impl AgentManager {
             session_id: Arc::new(RwLock::new(None)),
             usage: Arc::new(RwLock::new(AgentUsage::default())),
             message_count: Arc::new(RwLock::new(0)),
+            current_context: Arc::new(RwLock::new(0)),
             stdin_tx,
             encode_user,
             kill_tx: Mutex::new(Some(kill_tx)),
@@ -333,6 +336,7 @@ fn snapshot_of(h: &AgentHandle) -> AgentSnapshot {
         last_activity: *h.last_activity.read(),
         usage: h.usage.read().clone(),
         message_count: *h.message_count.read(),
+        current_context_tokens: *h.current_context.read(),
     }
 }
 
@@ -466,6 +470,13 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
                     acc.turns += 1;
                     acc.clone()
                 };
+                // Current context size = this turn's total input tokens
+                // (not cumulative). Each turn's input field reflects the
+                // entire conversation length sent to the model.
+                let ctx = delta.input_tokens
+                    + delta.cache_read_tokens
+                    + delta.cache_creation_tokens;
+                *h.current_context.write() = ctx;
                 mgr.emit(AgentEvent::Result {
                     agent_id: agent_id.to_string(),
                     usage: snapshot,

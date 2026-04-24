@@ -37,6 +37,9 @@ export interface AgentSnapshot {
   last_activity: string;
   usage: AgentUsage;
   message_count: number;
+  /// Most recent turn's total input tokens (input + cache_read + cache_creation).
+  /// Used for the context indicator + auto-compact threshold.
+  current_context_tokens: number;
 }
 
 export type AgentEvent =

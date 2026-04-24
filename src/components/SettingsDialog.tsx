@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink, Zap,
+  X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink, Zap, Archive,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost, fmtNumber } from "../lib/cn";
@@ -51,6 +51,10 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [extraSpent, setExtraSpent] = useState(0);
   const [extraResetDate, setExtraResetDate] = useState("");
 
+  // Auto-compact
+  const [autoCompactOn, setAutoCompactOn] = useState(false);
+  const [autoCompactThreshold, setAutoCompactThreshold] = useState(85);
+
   useEffect(() => {
     if (!open) return;
     Promise.all([
@@ -78,6 +82,9 @@ export function SettingsDialog({ open, onClose }: Props) {
       setResetHour(numOr(s.plan_weekly_reset_hour, 7));
       setExtraSpent(numOr(s.plan_extra_spent, 0));
       setExtraResetDate(s.plan_extra_reset_date || "");
+
+      setAutoCompactOn(s.auto_compact === "true");
+      setAutoCompactThreshold(numOr(s.auto_compact_threshold, 85));
     }).catch(console.error);
   }, [open]);
 
@@ -219,6 +226,34 @@ export function SettingsDialog({ open, onClose }: Props) {
             ) : (
               <div className="text-xs text-base-500">loading…</div>
             )}
+          </Section>
+
+          {/* ----- Auto-compact ----- */}
+          <Section icon={<Archive size={12} />} title="Auto-compact">
+            <ToggleRow
+              checked={autoCompactOn}
+              onChange={(v) => {
+                setAutoCompactOn(v);
+                save("auto_compact", v ? "true" : "false");
+              }}
+              label="Auto-compact agents when context gets full"
+              hint="When an agent's context exceeds the threshold below, the app asks it to summarize itself, kills the process, and respawns with the summary in the system prompt. The chat history above remains visible. Long sessions never crash, but the agent loses turn-by-turn detail beyond the summary."
+            />
+            <Field label={`Threshold (% of 200k context window) — current: ${autoCompactThreshold}%`}>
+              <input
+                type="range"
+                min={50}
+                max={95}
+                step={1}
+                value={autoCompactThreshold}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setAutoCompactThreshold(v);
+                  save("auto_compact_threshold", String(v));
+                }}
+                className="w-full accent-(--color-accent-cyan)"
+              />
+            </Field>
           </Section>
 
           {/* ----- Plan limits (mirrors claude.ai) ----- */}

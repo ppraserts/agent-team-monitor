@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
 import { findPreset, PRESETS } from "../lib/presets";
+import { compactAgent } from "../lib/compact";
 import type { ChatMessage } from "../types";
+
+/// Default model context window for the bar denominator. Sonnet/Opus are 200k,
+/// Haiku is 200k. Override per-model later if needed.
+const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 interface Props {
   agentId: string;
@@ -49,6 +54,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
           { label: "/agent", insert: "/agent ", hint: "spawn agent from preset", mode: "replace-all" },
           { label: "/spawn", insert: "/spawn ", hint: "alias of /agent", mode: "replace-all" },
           { label: "/kill", insert: "/kill ", hint: "terminate agent by name", mode: "replace-all" },
+          { label: "/compact", insert: "/compact", hint: "summarize + restart this agent (frees context)", mode: "replace-all" },
           { label: "/list", insert: "/list", hint: "show current team", mode: "replace-all" },
           { label: "/help", insert: "/help", hint: "show all commands", mode: "replace-all" },
         ];
@@ -189,6 +195,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
 /agent <Preset> [as <CustomName>]   spawn an agent from a preset (uses this agent's cwd)
 /spawn <Preset> [as <CustomName>]   alias for /agent
 /kill <Name>                        terminate an agent by name
+/compact                            summarize this agent's context + restart it (frees context)
 /list                               show current team
 /help                               this help
 Available presets: ${presetList}`,
@@ -248,6 +255,19 @@ Available presets: ${presetList}`,
         pushLocal(`Spawned @${customName} (${preset.role}) in ${snapshot.spec.cwd}`);
       } catch (e: any) {
         pushLocal(`Spawn failed: ${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    if (cmd === "compact") {
+      pushLocal("Compacting this agent — summarizing and respawning…");
+      try {
+        const r = await compactAgent(agentId);
+        pushLocal(
+          `Compacted: summary ${r.summary.length} chars · ${r.carriedMessages} messages preserved visually · new agent id ${r.newAgent.id.slice(0, 8)}`,
+        );
+      } catch (e: any) {
+        pushLocal(`Compact failed: ${e?.message ?? e}`);
       }
       return true;
     }
@@ -323,6 +343,17 @@ Available presets: ${presetList}`,
             {snapshot.spec.cwd}
           </div>
         </div>
+        <ContextBar
+          tokens={snapshot.current_context_tokens}
+          cap={DEFAULT_CONTEXT_WINDOW}
+          onCompact={async () => {
+            try {
+              await compactAgent(agentId);
+            } catch (e) {
+              console.error("compact failed", e);
+            }
+          }}
+        />
         <div className="flex items-center gap-3 text-[10px] font-mono text-base-400">
           <span title="Total tokens">
             <span className="text-(--color-accent-cyan)">↓</span>{" "}
@@ -537,6 +568,51 @@ function MessageBubble({
       <div className="text-[9px] text-base-600 mt-0.5 font-mono">
         {new Date(msg.ts).toLocaleTimeString()}
       </div>
+    </div>
+  );
+}
+
+function ContextBar({
+  tokens, cap, onCompact,
+}: { tokens: number; cap: number; onCompact: () => void }) {
+  const pct = cap > 0 ? Math.min(100, (tokens / cap) * 100) : 0;
+  const overWarn = pct >= 75;
+  const overDanger = pct >= 90;
+  const color = overDanger
+    ? "var(--color-accent-red)"
+    : overWarn
+    ? "var(--color-accent-amber)"
+    : "var(--color-accent-cyan)";
+  return (
+    <div
+      className="flex items-center gap-1.5"
+      title={`Context: ${tokens.toLocaleString()} / ${cap.toLocaleString()} tokens (${pct.toFixed(0)}%) — click to /compact`}
+    >
+      <div className="flex flex-col items-end">
+        <div className="text-[9px] font-mono" style={{ color }}>
+          ctx {pct.toFixed(0)}%
+        </div>
+        <div className="w-16 h-1 rounded-full bg-base-800 overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all"
+            style={{ width: `${pct}%`, background: color }}
+          />
+        </div>
+      </div>
+      {tokens > 0 && (
+        <button
+          onClick={onCompact}
+          className={cn(
+            "p-1 rounded transition",
+            overWarn
+              ? "text-(--color-accent-amber) hover:bg-(--color-accent-amber)/20"
+              : "text-base-500 hover:text-(--color-accent-cyan) hover:bg-base-800/50",
+          )}
+          title="Compact this agent (summarize + restart, free context)"
+        >
+          <Archive size={12} />
+        </button>
+      )}
     </div>
   );
 }
