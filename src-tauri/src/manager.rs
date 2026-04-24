@@ -174,7 +174,37 @@ impl AgentManager {
         let snap = snapshot_of(&handle);
         self.emit(AgentEvent::Created { snapshot: snap.clone() });
         self.set_status(&id, AgentStatus::Idle);
+
+        // Broadcast a brief roster update to every existing teammate so they
+        // learn about the new arrival even though their initial system prompt
+        // was a snapshot from before this spawn.
+        if !live_roster.is_empty() {
+            self.broadcast_team_update(&live_roster, &spec.name, &spec.role).await;
+        }
+
         Ok(snap)
+    }
+
+    async fn broadcast_team_update(
+        &self,
+        existing_names: &[String],
+        new_name: &str,
+        new_role: &str,
+    ) {
+        let notice = format!(
+            "[TEAM ROSTER UPDATE] A new teammate has joined: @{} — {}. \
+             You can now address them with @{}. \
+             (Acknowledge briefly only if you have something useful to say; \
+             otherwise just note it and wait for the user.)",
+            new_name, new_role, new_name,
+        );
+        for name in existing_names {
+            if let Some(id) = self.id_by_name(name) {
+                if let Err(e) = self.send_internal(&id, notice.clone(), None).await {
+                    tracing::warn!("team update broadcast to {} failed: {}", name, e);
+                }
+            }
+        }
     }
 
     pub async fn send(&self, agent_id: &str, message: String) -> Result<()> {
