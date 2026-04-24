@@ -151,8 +151,12 @@ export interface CustomPreset {
 }
 
 // ccusage JSON shapes (raw from `npx ccusage <kind> --json`).
+// Daily uses `date` (YYYY-MM-DD), weekly uses `week` (YYYY-MM-DD of week start),
+// monthly uses `month` (YYYY-MM).
 export interface CcusagePeriodEntry {
-  date: string;
+  date?: string;
+  week?: string;
+  month?: string;
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens: number;

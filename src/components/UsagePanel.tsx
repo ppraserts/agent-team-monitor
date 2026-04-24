@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw, Zap, Calendar, Clock, AlertCircle, Settings as Cog } from "lucide-react";
+import { RefreshCw, Zap, Calendar, Clock, AlertCircle, Settings as Cog, Info } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost, fmtNumber } from "../lib/cn";
 import type { CcusagePeriodEntry, CcusageReport, UsageStats } from "../types";
@@ -40,16 +40,16 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const today = useMemo(() => {
-    const arr = report?.daily?.daily ?? [];
-    if (!arr.length) return null;
-    // Latest entry by date
-    return [...arr].sort((a, b) => b.date.localeCompare(a.date))[0] ?? null;
-  }, [report]);
-
-  const weekTotal = useMemo(() => sumPeriod(report?.weekly?.weekly ?? []), [report]);
-  const monthTotal = useMemo(
-    () => sumPeriod(report?.monthly?.monthly ?? []),
+  const today = useMemo(
+    () => latestByKey(report?.daily?.daily ?? [], "date"),
+    [report],
+  );
+  const thisWeek = useMemo(
+    () => latestByKey(report?.weekly?.weekly ?? [], "week"),
+    [report],
+  );
+  const thisMonth = useMemo(
+    () => latestByKey(report?.monthly?.monthly ?? [], "month"),
     [report],
   );
 
@@ -112,27 +112,24 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
         )}
 
         {/* This week */}
-        <Section icon={<Calendar size={12} />} title="This week (so far)">
-          <TotalsCard
-            input={weekTotal.input}
-            output={weekTotal.output}
-            cacheRead={weekTotal.cacheRead}
-            cacheCreation={weekTotal.cacheCreation}
-            cost={weekTotal.cost}
-            limitTokens={weeklyLimitTokens}
-          />
-        </Section>
+        {thisWeek && (
+          <Section
+            icon={<Calendar size={12} />}
+            title={`This week (from ${thisWeek.week})`}
+          >
+            <PeriodCard entry={thisWeek} limitTokens={weeklyLimitTokens} />
+          </Section>
+        )}
 
         {/* This month */}
-        <Section icon={<Calendar size={12} />} title="This month (so far)">
-          <TotalsCard
-            input={monthTotal.input}
-            output={monthTotal.output}
-            cacheRead={monthTotal.cacheRead}
-            cacheCreation={monthTotal.cacheCreation}
-            cost={monthTotal.cost}
-          />
-        </Section>
+        {thisMonth && (
+          <Section
+            icon={<Calendar size={12} />}
+            title={`This month (${thisMonth.month})`}
+          >
+            <PeriodCard entry={thisMonth} />
+          </Section>
+        )}
 
         {/* In-app history (our own SQLite) */}
         {stats && (
@@ -148,9 +145,25 @@ export function UsagePanel({ weeklyLimitTokens }: Props) {
           </Section>
         )}
 
-        <div className="text-[10px] text-base-600 italic text-center pt-2">
-          Numbers are computed locally from ~/.claude/projects/*.jsonl. They include
-          ALL Claude CLI usage on this machine, not just this app.
+        <div className="text-[10px] text-base-500 leading-relaxed border-t border-base-800 pt-3 mt-2 space-y-1.5">
+          <div className="flex items-start gap-1.5">
+            <Info size={10} className="mt-0.5 shrink-0 text-(--color-accent-cyan)" />
+            <div>
+              <span className="text-base-300 font-semibold">Cost = API-equivalent.</span>{" "}
+              ccusage prices every token at Anthropic's <em>public API rate</em>.
+              On Pro / Max plans you pay a flat subscription, so this is NOT what
+              your card will be charged — it's a useful proxy for "how much
+              Claude work you'd be paying for if you were on pure API billing."
+            </div>
+          </div>
+          <div className="flex items-start gap-1.5">
+            <Info size={10} className="mt-0.5 shrink-0 text-(--color-accent-cyan)" />
+            <div>
+              Numbers cover <span className="text-base-300 font-semibold">ALL Claude CLI usage</span>{" "}
+              on this machine (anything that wrote to <code className="text-[9px]">~/.claude/projects/*.jsonl</code>),
+              not just agents spawned from this app.
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -170,17 +183,46 @@ function Section({
   );
 }
 
-function PeriodCard({ entry }: { entry: CcusagePeriodEntry }) {
+function PeriodCard({
+  entry, limitTokens,
+}: {
+  entry: CcusagePeriodEntry;
+  limitTokens?: number;
+}) {
+  const totalNonCache = entry.inputTokens + entry.outputTokens;
+  const pct = limitTokens ? Math.min(100, (totalNonCache / limitTokens) * 100) : null;
   return (
     <div className="rounded-md border border-base-700/40 bg-base-800/40 p-2 space-y-2">
-      <div className="flex items-baseline gap-3 text-xs">
+      <div className="flex items-baseline gap-3 text-xs flex-wrap">
         <span className="text-(--color-accent-cyan) font-mono">↓ {fmtNumber(entry.inputTokens)}</span>
         <span className="text-(--color-accent-violet) font-mono">↑ {fmtNumber(entry.outputTokens)}</span>
         <span className="text-base-500 font-mono">cache {fmtNumber(entry.cacheReadTokens)}</span>
-        <span className="ml-auto text-(--color-accent-amber) font-mono font-semibold">
-          {fmtCost(entry.totalCost)}
+        <span
+          className="ml-auto text-(--color-accent-amber) font-mono font-semibold"
+          title="API-equivalent cost — see note at the bottom"
+        >
+          ≈ {fmtCost(entry.totalCost)}
         </span>
       </div>
+      {pct !== null && (
+        <div>
+          <div className="flex items-baseline justify-between text-[10px] mb-0.5">
+            <span className="text-base-500">vs your weekly limit ({fmtNumber(limitTokens!)} tok)</span>
+            <span className={cn("font-mono", pct > 90 ? "text-(--color-accent-red)" : "text-base-400")}>
+              {pct.toFixed(1)}%
+            </span>
+          </div>
+          <div className="h-2 rounded-full bg-base-900 overflow-hidden">
+            <div
+              className={cn(
+                "h-full rounded-full transition-all",
+                pct > 90 ? "bg-(--color-accent-red)" : "bg-(--color-accent-cyan)",
+              )}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      )}
       {entry.modelBreakdowns.length > 0 && (
         <div className="space-y-1 pt-1 border-t border-base-700/40">
           {entry.modelBreakdowns.map((m) => (
@@ -215,49 +257,6 @@ function ModelBar({
           style={{ width: `${pct}%`, background: color }}
         />
       </div>
-    </div>
-  );
-}
-
-function TotalsCard({
-  input, output, cacheRead, cacheCreation, cost, limitTokens,
-}: {
-  input: number; output: number; cacheRead: number; cacheCreation: number; cost: number;
-  limitTokens?: number;
-}) {
-  const totalNonCache = input + output;
-  const pct = limitTokens ? Math.min(100, (totalNonCache / limitTokens) * 100) : null;
-  return (
-    <div className="rounded-md border border-base-700/40 bg-base-800/40 p-2 space-y-2">
-      <div className="flex items-baseline gap-3 text-xs">
-        <span className="text-(--color-accent-cyan) font-mono">↓ {fmtNumber(input)}</span>
-        <span className="text-(--color-accent-violet) font-mono">↑ {fmtNumber(output)}</span>
-        <span className="text-base-500 font-mono">
-          cache r/w {fmtNumber(cacheRead)}/{fmtNumber(cacheCreation)}
-        </span>
-        <span className="ml-auto text-(--color-accent-amber) font-mono font-semibold">
-          {fmtCost(cost)}
-        </span>
-      </div>
-      {pct !== null && (
-        <div>
-          <div className="flex items-baseline justify-between text-[10px] mb-0.5">
-            <span className="text-base-500">vs your weekly limit</span>
-            <span className={cn("font-mono", pct > 90 ? "text-(--color-accent-red)" : "text-base-400")}>
-              {pct.toFixed(1)}%
-            </span>
-          </div>
-          <div className="h-2 rounded-full bg-base-900 overflow-hidden">
-            <div
-              className={cn(
-                "h-full rounded-full transition-all",
-                pct > 90 ? "bg-(--color-accent-red)" : "bg-(--color-accent-cyan)",
-              )}
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -310,17 +309,18 @@ function KV({ k, v }: { k: string; v: string }) {
   );
 }
 
-function sumPeriod(arr: CcusagePeriodEntry[]) {
-  return arr.reduce(
-    (acc, e) => ({
-      input: acc.input + e.inputTokens,
-      output: acc.output + e.outputTokens,
-      cacheRead: acc.cacheRead + e.cacheReadTokens,
-      cacheCreation: acc.cacheCreation + e.cacheCreationTokens,
-      cost: acc.cost + e.totalCost,
-    }),
-    { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0 },
-  );
+/// Take the entry with the largest value at `key` (latest period).
+/// Empty array → null.
+function latestByKey<K extends "date" | "week" | "month">(
+  arr: CcusagePeriodEntry[],
+  key: K,
+): CcusagePeriodEntry | null {
+  if (arr.length === 0) return null;
+  return [...arr].sort((a, b) => {
+    const av = (a[key] as string | undefined) ?? "";
+    const bv = (b[key] as string | undefined) ?? "";
+    return bv.localeCompare(av);
+  })[0];
 }
 
 function shortModel(name: string): string {
