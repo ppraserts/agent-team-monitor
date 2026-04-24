@@ -200,7 +200,12 @@ impl AgentManager {
         );
         for name in existing_names {
             if let Some(id) = self.id_by_name(name) {
-                if let Err(e) = self.send_internal(&id, notice.clone(), None).await {
+                // Show a short, friendly version in the chat panel — full notice goes on stdin.
+                let display = format!("[team] @{} just joined the team.", new_name);
+                if let Err(e) = self
+                    .send_internal(&id, notice.clone(), Some(display), None)
+                    .await
+                {
                     tracing::warn!("team update broadcast to {} failed: {}", name, e);
                 }
             }
@@ -208,13 +213,20 @@ impl AgentManager {
     }
 
     pub async fn send(&self, agent_id: &str, message: String) -> Result<()> {
-        self.send_internal(agent_id, message, None).await
+        self.send_internal(agent_id, message, None, None).await
     }
 
+    /// Sends a message to an agent.
+    /// - `stdin_message` is what gets piped to the child process.
+    /// - `display_override` (optional) is what the UI + DB record as the user
+    ///   message. When `None`, the stdin text is used as-is. This lets the
+    ///   mention router show a clean "@PM1 asked: <question>" in chat bubbles
+    ///   while still piping the full forwarded context to the agent.
     async fn send_internal(
         &self,
         agent_id: &str,
-        message: String,
+        stdin_message: String,
+        display_override: Option<String>,
         from_agent_id: Option<String>,
     ) -> Result<()> {
         let handle = self
@@ -225,7 +237,7 @@ impl AgentManager {
             .cloned()
             .ok_or_else(|| anyhow!("agent {} not found", agent_id))?;
 
-        let line = (handle.encode_user)(&message);
+        let line = (handle.encode_user)(&stdin_message);
         handle.stdin_tx.send(line).await
             .context("failed to send to agent stdin")?;
 
@@ -234,13 +246,14 @@ impl AgentManager {
         *handle.message_count.write() += 1;
         self.set_status(agent_id, AgentStatus::Thinking);
 
-        // Persist + emit with same id.
+        let display = display_override.unwrap_or(stdin_message);
+
         let msg_id = uuid::Uuid::new_v4().to_string();
         if let Err(e) = self.db.save_message(
             &msg_id,
             agent_id,
             "user",
-            &message,
+            &display,
             from_agent_id.as_deref(),
             ts,
         ) {
@@ -249,7 +262,7 @@ impl AgentManager {
         self.emit(AgentEvent::Message {
             agent_id: agent_id.to_string(),
             role: "user".into(),
-            content: message,
+            content: display,
             ts,
             from_agent_id,
         });
@@ -590,12 +603,18 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
             from_agent_id: from_id.to_string(),
             to_agent_name: to_name.clone(),
             to_agent_id: Some(to_id.clone()),
-            // For the UI bubble + activity feed, show only the question part —
-            // the full context is sent on stdin but would be noisy in the feed.
-            message: combined_q,
+            message: combined_q.clone(),
         });
+        // stdin gets the full contextual wrapper; UI bubble + DB record only
+        // the bare question (the source's prior reply is already visible in
+        // the source's own chat panel for anyone curious).
         let _ = mgr
-            .send_internal(&to_id, forwarded, Some(from_id.to_string()))
+            .send_internal(
+                &to_id,
+                forwarded,
+                Some(combined_q),
+                Some(from_id.to_string()),
+            )
             .await;
     }
 }

@@ -33,6 +33,16 @@ export function TeamFeed() {
 
     for (const r of Object.values(agents)) {
       for (const m of r.messages) {
+        const trimmed = (m.content ?? "").trim();
+        // Skip purely-trivial acknowledgements ("...", "ok", "👍", emoji-only).
+        // These are useful in the per-agent chat panel but make the global
+        // activity feed noisy.
+        const isTrivial =
+          m.role !== "tool" &&
+          (trimmed.length < 5 ||
+            /^[\p{P}\p{S}\s]+$/u.test(trimmed));
+        if (isTrivial) continue;
+
         if (m.role === "tool") {
           all.push({
             ts: m.ts, kind: "tool", role: "tool",
