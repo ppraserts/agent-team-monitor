@@ -497,20 +497,112 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
     }
 }
 
-/// Look for `@AgentName` mentions in assistant text and route the trailing
-/// message segment to that agent — but only if the SOURCE agent is permitted
-/// to mention others, and the TARGET is in the allowlist (if any).
+/// Look for `@AgentName` mentions in assistant text and route them to the
+/// target agent(s). When forwarding, we include the SOURCE agent's full reply
+/// as context so the target sees the conversation around the question, not
+/// just the bare line — otherwise teammates only see decontextualized snippets
+/// and have to ask "what are we talking about?".
 async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str) {
     if !text.contains('@') {
         return;
     }
 
-    // Resolve source agent's mention policy snapshot once.
-    let (allow_mentions, allowlist) = match mgr.registry.read().by_id.get(from_id) {
-        Some(h) => (h.spec.allow_mentions, h.spec.mention_allowlist.clone()),
+    // Resolve source agent's mention policy + display name once.
+    let (allow_mentions, allowlist, from_name) = match mgr.registry.read().by_id.get(from_id) {
+        Some(h) => (
+            h.spec.allow_mentions,
+            h.spec.mention_allowlist.clone(),
+            h.spec.name.clone(),
+        ),
         None => return,
     };
 
+    // Group all `@Name <msg>` lines by target so a single agent receives ONE
+    // forwarded message even if it was addressed multiple times in the same
+    // reply.
+    let mut by_target: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (to_name, msg) in find_mentions(text) {
+        // --- Policy enforcement ---
+        if !allow_mentions {
+            mgr.emit(AgentEvent::MentionBlocked {
+                from_agent_id: from_id.to_string(),
+                to_agent_name: to_name,
+                reason: "source agent has allow_mentions=false".into(),
+            });
+            continue;
+        }
+        if !allowlist.is_empty() && !allowlist.iter().any(|n| n == &to_name) {
+            mgr.emit(AgentEvent::MentionBlocked {
+                from_agent_id: from_id.to_string(),
+                to_agent_name: to_name.clone(),
+                reason: format!("'{}' is not in source agent's mention allowlist", to_name),
+            });
+            continue;
+        }
+        by_target.entry(to_name).or_default().push(msg);
+    }
+
+    if by_target.is_empty() {
+        return;
+    }
+
+    // Strip the `@mention` lines from the assistant text to form the context
+    // body (everything the source said EXCEPT the lines specifically directed
+    // at someone). If that body is trivial we skip the wrapper and just
+    // forward the bare question (keeps short chitchat snappy).
+    let context_body = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('@'))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    let has_context = context_body.chars().count() > 30;
+
+    for (to_name, msgs) in by_target {
+        let to_id = match mgr.id_by_name(&to_name) {
+            Some(id) if id != from_id => id,
+            _ => continue,
+        };
+
+        let combined_q = msgs.join("\n\n");
+        let forwarded = if has_context {
+            format!(
+                "[FORWARDED FROM @{from}]\n\n\
+                 Earlier in @{from}'s reply (context for you):\n\
+                 -----\n\
+                 {ctx}\n\
+                 -----\n\n\
+                 @{from} addressed YOU (@{to}) directly with:\n\
+                 {q}\n\n\
+                 (Reply naturally. To talk back to @{from} or anyone else, write `@TheirName <message>` on a new line.)",
+                from = from_name,
+                to = to_name,
+                ctx = context_body,
+                q = combined_q,
+            )
+        } else {
+            // Short/bare mention — keep it lightweight.
+            combined_q.clone()
+        };
+
+        mgr.emit(AgentEvent::Mention {
+            from_agent_id: from_id.to_string(),
+            to_agent_name: to_name.clone(),
+            to_agent_id: Some(to_id.clone()),
+            // For the UI bubble + activity feed, show only the question part —
+            // the full context is sent on stdin but would be noisy in the feed.
+            message: combined_q,
+        });
+        let _ = mgr
+            .send_internal(&to_id, forwarded, Some(from_id.to_string()))
+            .await;
+    }
+}
+
+/// Parse `@Name <rest of line>` occurrences. Returns `(name, message)` per line.
+fn find_mentions(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
         if !trimmed.starts_with('@') {
@@ -523,43 +615,15 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
         if name_end == 0 {
             continue;
         }
-        let to_name = &rest[..name_end];
-        let msg = rest[name_end..].trim_start_matches([':', ' ', ',']).trim();
+        let to_name = rest[..name_end].to_string();
+        let msg = rest[name_end..]
+            .trim_start_matches([':', ' ', ','])
+            .trim()
+            .to_string();
         if msg.is_empty() {
             continue;
         }
-
-        // --- Policy enforcement ---
-        if !allow_mentions {
-            mgr.emit(AgentEvent::MentionBlocked {
-                from_agent_id: from_id.to_string(),
-                to_agent_name: to_name.to_string(),
-                reason: "source agent has allow_mentions=false".into(),
-            });
-            continue;
-        }
-        if !allowlist.is_empty() && !allowlist.iter().any(|n| n == to_name) {
-            mgr.emit(AgentEvent::MentionBlocked {
-                from_agent_id: from_id.to_string(),
-                to_agent_name: to_name.to_string(),
-                reason: format!("'{}' is not in source agent's mention allowlist", to_name),
-            });
-            continue;
-        }
-
-        let to_id = match mgr.id_by_name(to_name) {
-            Some(id) if id != from_id => id,
-            _ => continue,
-        };
-
-        mgr.emit(AgentEvent::Mention {
-            from_agent_id: from_id.to_string(),
-            to_agent_name: to_name.to_string(),
-            to_agent_id: Some(to_id.clone()),
-            message: msg.to_string(),
-        });
-        let _ = mgr
-            .send_internal(&to_id, msg.to_string(), Some(from_id.to_string()))
-            .await;
+        out.push((to_name, msg));
     }
+    out
 }
