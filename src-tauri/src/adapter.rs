@@ -179,10 +179,16 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
                         }
                     }
                 }
-                if text.is_empty() {
+                // Trim leading/trailing blank lines + whitespace. Claude often
+                // emits leading newlines when it's responding after a header /
+                // system-style preamble (e.g. our roster injection), which
+                // would otherwise show as a tall blank gap at the top of the
+                // chat bubble.
+                let cleaned = text.trim().to_string();
+                if cleaned.is_empty() {
                     ParsedEvent::Other
                 } else {
-                    ParsedEvent::AssistantText { text }
+                    ParsedEvent::AssistantText { text: cleaned }
                 }
             }
             "result" => {
