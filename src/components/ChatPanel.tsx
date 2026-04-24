@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
@@ -376,6 +376,7 @@ Available presets: ${presetList}`,
             {snapshot.spec.cwd}
           </div>
         </div>
+        <CardLinkBadge agentId={agentId} />
         <ContextBar
           tokens={snapshot.current_context_tokens}
           cap={DEFAULT_CONTEXT_WINDOW}
@@ -803,6 +804,20 @@ function ApprovalCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function CardLinkBadge({ agentId }: { agentId: string }) {
+  const link = useStore((s) => s.agentCardLink[agentId]);
+  if (!link) return null;
+  return (
+    <div
+      className="px-2 py-0.5 rounded-md bg-(--color-accent-violet)/15 border border-(--color-accent-violet)/40 text-(--color-accent-violet) text-[10px] flex items-center gap-1 max-w-40"
+      title={`Working on board card: ${link.cardTitle}`}
+    >
+      <KanbanSquare size={10} />
+      <span className="truncate font-medium">{link.cardTitle}</span>
     </div>
   );
 }

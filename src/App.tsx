@@ -130,6 +130,9 @@ export default function App() {
           );
           break;
         case "exit":
+          // Drop any board-card linkage so the card stops showing
+          // "working" once the underlying process is gone.
+          useStore.getState().unlinkAgent(ev.agent_id);
           break;
       }
     }).then((u) => {

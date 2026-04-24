@@ -53,6 +53,17 @@ export function BoardsDialog({ open, onClose }: Props) {
   const teamAgentNames = useStore(
     useShallow((s) => Object.values(s.agents).map((a) => a.snapshot.spec.name)),
   );
+  /// agent_id → { cardId, cardTitle, boardId } — populated by Send.
+  const agentCardLink = useStore((s) => s.agentCardLink);
+  /// name → snapshot lookup so cards can show whether their assignees are
+  /// currently busy / idle / not spawned.
+  const agentsByName = useStore(
+    useShallow((s) =>
+      Object.fromEntries(
+        Object.values(s.agents).map((a) => [a.snapshot.spec.name, a.snapshot]),
+      ),
+    ),
+  );
 
   const refreshBoards = async () => {
     try {
@@ -180,6 +191,7 @@ export function BoardsDialog({ open, onClose }: Props) {
     if (!confirm("Delete this card?")) return;
     try {
       await api.cardsDelete(id);
+      useStore.getState().unlinkCard(id);
       setCards((cs) => cs.filter((c) => c.id !== id));
       if (editingCard?.id === id) setEditingCard(null);
     } catch (e: any) { setError(String(e?.message ?? e)); }
@@ -192,6 +204,7 @@ export function BoardsDialog({ open, onClose }: Props) {
     }
     const text = `[BOARD TASK] ${card.title}\n\n${card.description ?? ""}`.trim();
     const liveAgents = useStore.getState().agents;
+    const linkedAgentIds: string[] = [];
     let sent = 0;
     for (const name of card.assignees) {
       const target = Object.values(liveAgents).find(
@@ -200,16 +213,63 @@ export function BoardsDialog({ open, onClose }: Props) {
       if (!target) continue;
       try {
         await api.sendAgent(target.snapshot.id, text);
+        linkedAgentIds.push(target.snapshot.id);
         sent++;
       } catch (e) {
         console.error("send card failed for", name, e);
       }
     }
-    alert(
-      sent === card.assignees.length
-        ? `Sent to ${sent} assignee(s).`
-        : `Sent to ${sent} of ${card.assignees.length}. The rest aren't currently spawned.`,
-    );
+
+    if (sent > 0) {
+      // Auto-advance card to the next column (treat the column order as the
+      // workflow). If we're already at the last column, leave it where it is.
+      const currentIdx = columns.findIndex((c) => c.id === card.column_id);
+      const nextCol =
+        currentIdx >= 0 && currentIdx < columns.length - 1
+          ? columns[currentIdx + 1]
+          : null;
+      if (nextCol) {
+        try {
+          await api.cardsMove(card.id, nextCol.id, 0);
+          await refreshBoard(activeBoardId!);
+        } catch (e) {
+          console.error("auto-move on send failed:", e);
+        }
+      }
+
+      // Link the agents → this card so we can show 'Working: <card>' on
+      // their chat panel and 'Working' on the card.
+      useStore.getState().linkAgentsToCard(
+        linkedAgentIds,
+        card.id,
+        card.title,
+        activeBoardId!,
+      );
+    }
+
+    if (sent < card.assignees.length) {
+      alert(
+        `Sent to ${sent} of ${card.assignees.length}. The rest aren't currently spawned.`,
+      );
+    }
+  };
+
+  const onMarkDone = async (card: BoardCard) => {
+    if (columns.length === 0) return;
+    const lastCol = columns[columns.length - 1];
+    if (card.column_id === lastCol.id) {
+      // Already in the rightmost column — just unlink agents.
+      useStore.getState().unlinkCard(card.id);
+      return;
+    }
+    try {
+      await api.cardsMove(card.id, lastCol.id, 0);
+      useStore.getState().unlinkCard(card.id);
+      setEditingCard(null);
+      await refreshBoard(activeBoardId!);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    }
   };
 
   // ---------- Drag-drop ----------
@@ -442,6 +502,8 @@ export function BoardsDialog({ open, onClose }: Props) {
                             onRenameColumn={() => onRenameColumn(col)}
                             onDeleteColumn={() => onDeleteColumn(col)}
                             onClickCard={(c) => setEditingCard(c)}
+                            agentCardLink={agentCardLink}
+                            agentsByName={agentsByName}
                           />
                         ))}
                       </div>
@@ -464,10 +526,15 @@ export function BoardsDialog({ open, onClose }: Props) {
         <CardEditor
           card={editingCard}
           teamAgentNames={teamAgentNames}
+          isInLastColumn={
+            columns.length > 0 &&
+            editingCard.column_id === columns[columns.length - 1].id
+          }
           onClose={() => setEditingCard(null)}
           onSave={onSaveCard}
           onDelete={() => onDeleteCard(editingCard.id)}
           onSend={() => onSendCard(editingCard)}
+          onMarkDone={() => onMarkDone(editingCard)}
         />
       )}
     </div>
@@ -478,6 +545,7 @@ export function BoardsDialog({ open, onClose }: Props) {
 
 function ColumnView({
   column, cards, onAddCard, onRenameColumn, onDeleteColumn, onClickCard,
+  agentCardLink, agentsByName,
 }: {
   column: BoardColumn;
   cards: BoardCard[];
@@ -485,6 +553,8 @@ function ColumnView({
   onRenameColumn: () => void;
   onDeleteColumn: () => void;
   onClickCard: (c: BoardCard) => void;
+  agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
+  agentsByName: Record<string, import("../types").AgentSnapshot>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const sortable = useSortable({ id: `colhdr-${column.id}` });
@@ -563,7 +633,13 @@ function ColumnView({
           strategy={verticalListSortingStrategy}
         >
           {cards.map((c) => (
-            <CardView key={c.id} card={c} onClick={() => onClickCard(c)} />
+            <CardView
+              key={c.id}
+              card={c}
+              onClick={() => onClickCard(c)}
+              agentCardLink={agentCardLink}
+              agentsByName={agentsByName}
+            />
           ))}
         </SortableContext>
         {cards.length === 0 && (
@@ -585,12 +661,33 @@ function ColumnView({
 
 // ----- Card -----
 
-function CardView({ card, onClick }: { card: BoardCard; onClick: () => void }) {
+function CardView({
+  card, onClick, agentCardLink, agentsByName,
+}: {
+  card: BoardCard;
+  onClick: () => void;
+  agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
+  agentsByName: Record<string, import("../types").AgentSnapshot>;
+}) {
   const sortable = useSortable({ id: `card-${card.id}` });
   const style = {
     transform: CSS.Transform.toString(sortable.transform),
     transition: sortable.transition,
   };
+
+  // "Working" = at least one assignee is currently linked to THIS card AND
+  // that agent's status is thinking/working (a turn is in flight).
+  const linkedAgentIds = Object.entries(agentCardLink)
+    .filter(([, link]) => link.cardId === card.id)
+    .map(([aid]) => aid);
+  const anyWorking = card.assignees.some((name) => {
+    const snap = agentsByName[name];
+    if (!snap) return false;
+    if (!linkedAgentIds.includes(snap.id)) return false;
+    return snap.status === "thinking" || snap.status === "working";
+  });
+  const anyLinked = linkedAgentIds.length > 0;
+
   return (
     <div
       ref={sortable.setNodeRef}
@@ -599,11 +696,23 @@ function CardView({ card, onClick }: { card: BoardCard; onClick: () => void }) {
       {...sortable.listeners}
       onClick={onClick}
       className={cn(
-        "rounded-md border border-base-700/60 bg-base-800/60 hover:bg-base-800 hover:border-(--color-accent-cyan)/40 px-2.5 py-2 cursor-pointer transition",
+        "rounded-md border px-2.5 py-2 cursor-pointer transition",
+        anyWorking
+          ? "border-(--color-accent-cyan)/60 bg-(--color-accent-cyan)/5 glow-cyan"
+          : anyLinked
+          ? "border-(--color-accent-violet)/40 bg-base-800/60"
+          : "border-base-700/60 bg-base-800/60 hover:bg-base-800 hover:border-(--color-accent-cyan)/40",
         sortable.isDragging && "opacity-40",
       )}
     >
-      <div className="text-xs font-medium leading-snug">{card.title}</div>
+      <div className="flex items-start gap-1.5">
+        {anyWorking && (
+          <span className="w-1.5 h-1.5 rounded-full bg-(--color-accent-cyan) mt-1.5 pulse-ring text-(--color-accent-cyan) shrink-0" />
+        )}
+        <div className="text-xs font-medium leading-snug flex-1 min-w-0">
+          {card.title}
+        </div>
+      </div>
       {card.description && card.description.trim() && (
         <div className="text-[10px] text-base-500 mt-1 line-clamp-2 whitespace-pre-wrap">
           {card.description}
@@ -636,14 +745,16 @@ function CardView({ card, onClick }: { card: BoardCard; onClick: () => void }) {
 // ----- Card editor (modal) -----
 
 function CardEditor({
-  card, teamAgentNames, onClose, onSave, onDelete, onSend,
+  card, teamAgentNames, isInLastColumn, onClose, onSave, onDelete, onSend, onMarkDone,
 }: {
   card: BoardCard;
   teamAgentNames: string[];
+  isInLastColumn: boolean;
   onClose: () => void;
   onSave: (c: BoardCard) => void;
   onDelete: () => void;
   onSend: () => void;
+  onMarkDone: () => void;
 }) {
   const [draft, setDraft] = useState<BoardCard>(card);
   useEffect(() => { setDraft(card); }, [card.id]);
@@ -769,10 +880,19 @@ function CardEditor({
             onClick={onSend}
             disabled={draft.assignees.length === 0}
             className="px-2 py-1.5 text-xs rounded bg-(--color-accent-violet)/15 hover:bg-(--color-accent-violet)/25 border border-(--color-accent-violet)/40 text-(--color-accent-violet) disabled:opacity-40 flex items-center gap-1.5"
-            title="Send the card title + description as a chat message to all assignees"
+            title="Send the card title + description as a chat message to all assignees and auto-advance the card one column to the right"
           >
-            <Send size={12} /> Send to assignees
+            <Send size={12} /> Send &amp; advance
           </button>
+          {!isInLastColumn && (
+            <button
+              onClick={onMarkDone}
+              className="px-2 py-1.5 text-xs rounded bg-(--color-accent-green)/15 hover:bg-(--color-accent-green)/25 border border-(--color-accent-green)/40 text-(--color-accent-green) flex items-center gap-1.5"
+              title="Move this card to the rightmost column and unlink any working agents"
+            >
+              <Check size={12} /> Mark done
+            </button>
+          )}
           <div className="ml-auto flex gap-2">
             <button
               onClick={onClose}

@@ -27,6 +27,12 @@ interface State {
   /// Lives in-memory only — a new spawn / refresh clears them.
   proposalDecisions: Record<string, { decision: "approved" | "denied"; ts: string }>;
 
+  /// Which board card each agent is currently working on. Set when the user
+  /// clicks "Send to assignees" on a card; cleared when the card moves to
+  /// the rightmost (done) column, the card is deleted, or the agent exits.
+  /// In-memory only.
+  agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
+
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
   setHomeDir: (h: string | null) => void;
@@ -45,6 +51,15 @@ interface State {
   removeFromLayout: (id: string) => void;
 
   recordDecision: (key: string, decision: "approved" | "denied") => void;
+
+  linkAgentsToCard: (
+    agentIds: string[],
+    cardId: number,
+    cardTitle: string,
+    boardId: number,
+  ) => void;
+  unlinkAgent: (agentId: string) => void;
+  unlinkCard: (cardId: number) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -55,6 +70,7 @@ export const useStore = create<State>((set) => ({
   activeTileId: null,
   layout: [],
   proposalDecisions: {},
+  agentCardLink: {},
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
@@ -171,4 +187,29 @@ export const useStore = create<State>((set) => ({
         [key]: { decision, ts: new Date().toISOString() },
       },
     })),
+
+  linkAgentsToCard: (agentIds, cardId, cardTitle, boardId) =>
+    set((s) => {
+      const next = { ...s.agentCardLink };
+      for (const aid of agentIds) {
+        next[aid] = { cardId, cardTitle, boardId };
+      }
+      return { agentCardLink: next };
+    }),
+
+  unlinkAgent: (agentId) =>
+    set((s) => {
+      if (!s.agentCardLink[agentId]) return {};
+      const { [agentId]: _, ...rest } = s.agentCardLink;
+      return { agentCardLink: rest };
+    }),
+
+  unlinkCard: (cardId) =>
+    set((s) => {
+      const next: typeof s.agentCardLink = {};
+      for (const [aid, link] of Object.entries(s.agentCardLink)) {
+        if (link.cardId !== cardId) next[aid] = link;
+      }
+      return { agentCardLink: next };
+    }),
 }));
