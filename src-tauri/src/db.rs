@@ -80,8 +80,17 @@ impl Db {
         &self.path
     }
 
+    /// Expose the underlying connection to other modules that need to run
+    /// their own migrations + queries (e.g. boards). Holds the lock for the
+    /// duration of the closure.
+    pub fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> Result<R>) -> Result<R> {
+        let conn = self.conn.lock();
+        f(&conn)
+    }
+
     fn migrate(&self) -> Result<()> {
         let conn = self.conn.lock();
+        crate::boards::migrate(&conn)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS agents (

@@ -211,3 +211,41 @@ export interface SkillEntry {
   path: string;
   body: string;
 }
+
+// ---------------- Boards (Trello-style task boards) ----------------
+
+export interface Board {
+  id: number;
+  name: string;
+  description: string | null;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BoardColumn {
+  id: number;
+  board_id: number;
+  title: string;
+  color: string | null;
+  position: number;
+}
+
+export interface BoardCard {
+  id: number;
+  column_id: number;
+  title: string;
+  description: string | null;
+  assignees: string[];
+  labels: string[];
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CardInput {
+  title: string;
+  description?: string | null;
+  assignees?: string[];
+  labels?: string[];
+}

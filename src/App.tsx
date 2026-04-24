@@ -6,6 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
+import { BoardsDialog } from "./components/BoardsDialog";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
 import { UsagePanel } from "./components/UsagePanel";
@@ -22,6 +23,7 @@ type RightPaneMode = "feed" | "graph" | "usage" | "off";
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [boardsOpen, setBoardsOpen] = useState(false);
   const [rightPane, setRightPane] = useState<RightPaneMode>("feed");
   const [mentionPulse, setMentionPulse] = useState<{ from: string; to: string; key: number } | null>(
     null,
@@ -153,6 +155,7 @@ export default function App() {
       <Sidebar
         onSpawn={() => setSpawnOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenBoards={() => setBoardsOpen(true)}
         onResume={onResume}
       />
 
@@ -225,6 +228,7 @@ export default function App() {
 
       <SpawnDialog open={spawnOpen} onClose={() => setSpawnOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <BoardsDialog open={boardsOpen} onClose={() => setBoardsOpen(false)} />
     </div>
   );
 }

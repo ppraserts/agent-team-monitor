@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Bot, Plus, Terminal, Folder, Activity, Zap, History, RotateCcw, Settings,
+  Bot, Plus, Terminal, Folder, Activity, Zap, History, RotateCcw, Settings, KanbanSquare,
 } from "lucide-react";
 import { Logo } from "./Logo";
 import { useShallow } from "zustand/react/shallow";
@@ -12,12 +12,13 @@ import type { ExternalSession, HistoryAgent } from "../types";
 interface Props {
   onSpawn: () => void;
   onOpenSettings: () => void;
+  onOpenBoards: () => void;
   /// Resume a past agent — caller spawns a new agent with `--resume <session_id>`
   /// and pre-loads its message history into the store.
   onResume: (h: HistoryAgent) => Promise<void> | void;
 }
 
-export function Sidebar({ onSpawn, onOpenSettings, onResume }: Props) {
+export function Sidebar({ onSpawn, onOpenSettings, onOpenBoards, onResume }: Props) {
   const agents = useStore(useShallow((s) => Object.values(s.agents)));
   const ptys = useStore(useShallow((s) => Object.values(s.ptys)));
   const activeId = useStore((s) => s.activeTileId);
@@ -66,6 +67,13 @@ export function Sidebar({ onSpawn, onOpenSettings, onResume }: Props) {
           </div>
           <div className="text-[10px] text-base-500 tracking-widest">MONITOR · v0.1</div>
         </div>
+        <button
+          onClick={onOpenBoards}
+          className="text-base-500 hover:text-(--color-accent-cyan) transition"
+          title="Task boards"
+        >
+          <KanbanSquare size={16} />
+        </button>
         <button
           onClick={onOpenSettings}
           className="text-base-500 hover:text-(--color-accent-cyan) transition"

@@ -2,6 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentSnapshot,
   AgentSpec,
+  Board,
+  BoardCard,
+  BoardColumn,
+  CardInput,
   CcusageReport,
   CustomPreset,
   ExternalSession,
@@ -99,4 +103,36 @@ export const api = {
   skillsDelete: (path: string) => invoke<void>("skills_delete", { path }),
   skillsDefaultBody: (kind: SkillKind, name: string) =>
     invoke<string>("skills_default_body", { kind, name }),
+
+  // Boards (Trello-style task boards)
+  boardsList: () => invoke<Board[]>("boards_list"),
+  boardsCreate: (name: string, description?: string | null) =>
+    invoke<Board>("boards_create", { name, description: description ?? null }),
+  boardsUpdate: (id: number, name: string, description?: string | null) =>
+    invoke<Board>("boards_update", { id, name, description: description ?? null }),
+  boardsDelete: (id: number) => invoke<void>("boards_delete", { id }),
+
+  columnsList: (boardId: number) =>
+    invoke<BoardColumn[]>("columns_list", { boardId }),
+  columnsCreate: (boardId: number, title: string, color?: string | null) =>
+    invoke<BoardColumn>("columns_create", {
+      boardId, title, color: color ?? null,
+    }),
+  columnsUpdate: (id: number, title: string, color?: string | null) =>
+    invoke<BoardColumn>("columns_update", { id, title, color: color ?? null }),
+  columnsDelete: (id: number) => invoke<void>("columns_delete", { id }),
+  columnsReorder: (boardId: number, orderedIds: number[]) =>
+    invoke<void>("columns_reorder", { boardId, orderedIds }),
+
+  cardsList: (boardId: number) =>
+    invoke<BoardCard[]>("cards_list", { boardId }),
+  cardsCreate: (columnId: number, input: CardInput) =>
+    invoke<BoardCard>("cards_create", { columnId, input }),
+  cardsUpdate: (id: number, input: CardInput) =>
+    invoke<BoardCard>("cards_update", { id, input }),
+  cardsDelete: (id: number) => invoke<void>("cards_delete", { id }),
+  cardsMove: (cardId: number, newColumnId: number, newPosition: number) =>
+    invoke<BoardCard>("cards_move", {
+      cardId, newColumnId, newPosition,
+    }),
 };

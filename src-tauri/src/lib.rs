@@ -1,5 +1,6 @@
 mod adapter;
 mod agent;
+mod boards;
 mod db;
 mod manager;
 mod pty;
@@ -17,6 +18,7 @@ use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, UsageStats};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
+use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
 use crate::skills::{SkillEntry, SkillKind, SkillScope};
 
 static AGENT_MGR: OnceCell<AgentManager> = OnceCell::new();
@@ -330,6 +332,85 @@ fn skills_default_body(kind: SkillKind, name: String) -> String {
     skills::default_body(kind, &name)
 }
 
+// ---------- Boards (Trello-style task boards) ----------
+
+#[tauri::command]
+fn boards_list() -> Result<Vec<Board>, String> {
+    db().with_conn(|c| boards::list_boards(c)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn boards_create(name: String, description: Option<String>) -> Result<Board, String> {
+    db().with_conn(|c| boards::create_board(c, &name, description.as_deref()))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn boards_update(id: i64, name: String, description: Option<String>) -> Result<Board, String> {
+    db().with_conn(|c| boards::update_board(c, id, &name, description.as_deref()))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn boards_delete(id: i64) -> Result<(), String> {
+    db().with_conn(|c| boards::delete_board(c, id)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn columns_list(board_id: i64) -> Result<Vec<BoardColumn>, String> {
+    db().with_conn(|c| boards::list_columns(c, board_id))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn columns_create(
+    board_id: i64,
+    title: String,
+    color: Option<String>,
+) -> Result<BoardColumn, String> {
+    db().with_conn(|c| boards::create_column(c, board_id, &title, color.as_deref()))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn columns_update(
+    id: i64,
+    title: String,
+    color: Option<String>,
+) -> Result<BoardColumn, String> {
+    db().with_conn(|c| boards::update_column(c, id, &title, color.as_deref()))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn columns_delete(id: i64) -> Result<(), String> {
+    db().with_conn(|c| boards::delete_column(c, id)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn columns_reorder(board_id: i64, ordered_ids: Vec<i64>) -> Result<(), String> {
+    db().with_conn(|c| boards::reorder_columns(c, board_id, &ordered_ids))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cards_list(board_id: i64) -> Result<Vec<BoardCard>, String> {
+    db().with_conn(|c| boards::list_cards_for_board(c, board_id))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn cards_create(column_id: i64, input: CardInput) -> Result<BoardCard, String> {
+    db().with_conn(|c| boards::create_card(c, column_id, &input))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn cards_update(id: i64, input: CardInput) -> Result<BoardCard, String> {
+    db().with_conn(|c| boards::update_card(c, id, &input))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn cards_delete(id: i64) -> Result<(), String> {
+    db().with_conn(|c| boards::delete_card(c, id)).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn cards_move(card_id: i64, new_column_id: i64, new_position: usize) -> Result<BoardCard, String> {
+    db().with_conn(|c| boards::move_card(c, card_id, new_column_id, new_position))
+        .map_err(|e| e.to_string())
+}
+
 // ---------- Run ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -370,6 +451,20 @@ pub fn run() {
             skills_save,
             skills_delete,
             skills_default_body,
+            boards_list,
+            boards_create,
+            boards_update,
+            boards_delete,
+            columns_list,
+            columns_create,
+            columns_update,
+            columns_delete,
+            columns_reorder,
+            cards_list,
+            cards_create,
+            cards_update,
+            cards_delete,
+            cards_move,
             history_list_agents,
             history_load_messages,
             history_delete_agent,
