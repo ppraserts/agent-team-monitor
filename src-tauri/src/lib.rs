@@ -4,6 +4,7 @@ mod db;
 mod manager;
 mod pty;
 mod sessions;
+mod skills;
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, UsageStats};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
+use crate::skills::{SkillEntry, SkillKind, SkillScope};
 
 static AGENT_MGR: OnceCell<AgentManager> = OnceCell::new();
 static PTY_MGR: OnceCell<PtyManager> = OnceCell::new();
@@ -290,6 +292,44 @@ fn data_path() -> String {
     db().path().to_string_lossy().to_string()
 }
 
+// ---------- Skills + slash commands ----------
+
+#[tauri::command]
+fn skills_list(cwd: String) -> Result<Vec<SkillEntry>, String> {
+    skills::list_for_cwd(std::path::Path::new(&cwd)).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SkillSavePayload {
+    cwd: String,
+    kind: SkillKind,
+    scope: SkillScope,
+    name: String,
+    body: String,
+}
+
+#[tauri::command]
+fn skills_save(payload: SkillSavePayload) -> Result<SkillEntry, String> {
+    skills::save_entry(
+        std::path::Path::new(&payload.cwd),
+        payload.kind,
+        payload.scope,
+        &payload.name,
+        &payload.body,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn skills_delete(path: String) -> Result<(), String> {
+    skills::delete_entry(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn skills_default_body(kind: SkillKind, name: String) -> String {
+    skills::default_body(kind, &name)
+}
+
 // ---------- Run ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -326,6 +366,10 @@ pub fn run() {
             list_available_vendors,
             home_dir,
             ccusage_report,
+            skills_list,
+            skills_save,
+            skills_delete,
+            skills_default_body,
             history_list_agents,
             history_load_messages,
             history_delete_agent,

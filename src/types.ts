@@ -199,3 +199,15 @@ export interface CcusageReport {
   blocks: { blocks: CcusageBlockEntry[] } | null;
   error: string | null;
 }
+
+export type SkillKind = "skill" | "command";
+export type SkillScope = "global" | "project";
+
+export interface SkillEntry {
+  kind: SkillKind;
+  scope: SkillScope;
+  name: string;
+  description: string | null;
+  path: string;
+  body: string;
+}

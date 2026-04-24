@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
 import { findPreset, PRESETS } from "../lib/presets";
 import { compactAgent } from "../lib/compact";
+import { SkillsDialog } from "./SkillsDialog";
 import type { ChatMessage } from "../types";
 
 /// Default model context window for the bar denominator. Sonnet/Opus are 200k,
@@ -27,6 +28,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
     ),
   );
   const [input, setInput] = useState("");
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -366,6 +368,13 @@ Available presets: ${presetList}`,
           </span>
           <span title="Turns">⟳ {snapshot.usage.turns}</span>
         </div>
+        <button
+          onClick={() => setSkillsOpen(true)}
+          className="text-base-500 hover:text-(--color-accent-cyan) ml-1 transition"
+          title="Skills & slash commands for this agent"
+        >
+          <BookOpen size={14} />
+        </button>
         {onClose && (
           <button
             onClick={onClose}
@@ -397,6 +406,25 @@ Available presets: ${presetList}`,
           />
         ))}
       </div>
+
+      <SkillsDialog
+        open={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
+        cwd={snapshot.spec.cwd}
+        agentName={snapshot.spec.name}
+        onRequestRestart={async () => {
+          // Restart = compact (which kills + respawns with same spec).
+          // Fresh process picks up the new skills/commands at startup.
+          // We pass an empty-message shortcut: just kill+respawn without
+          // summary, since the user explicitly wants a clean restart.
+          try {
+            await compactAgent(agentId);
+            setSkillsOpen(false);
+          } catch (e) {
+            console.error("restart failed", e);
+          }
+        }}
+      />
 
       {/* Input */}
       <div className="border-t border-base-800 p-2 bg-base-900/80">

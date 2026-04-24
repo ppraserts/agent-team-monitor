@@ -8,6 +8,9 @@ import type {
   HistoryAgent,
   HistoryMessage,
   PtySnapshot,
+  SkillEntry,
+  SkillKind,
+  SkillScope,
   UsageStats,
   VendorInfo,
 } from "../types";
@@ -80,4 +83,20 @@ export const api = {
 
   // ccusage — global Claude usage from ~/.claude/projects/*.jsonl
   ccusageReport: () => invoke<CcusageReport>("ccusage_report"),
+
+  // Skills + slash commands
+  skillsList: (cwd: string) => invoke<SkillEntry[]>("skills_list", { cwd }),
+  skillsSave: (
+    cwd: string,
+    kind: SkillKind,
+    scope: SkillScope,
+    name: string,
+    body: string,
+  ) =>
+    invoke<SkillEntry>("skills_save", {
+      payload: { cwd, kind, scope, name, body },
+    }),
+  skillsDelete: (path: string) => invoke<void>("skills_delete", { path }),
+  skillsDefaultBody: (kind: SkillKind, name: string) =>
+    invoke<string>("skills_default_body", { kind, name }),
 };
