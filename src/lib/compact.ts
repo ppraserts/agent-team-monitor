@@ -14,7 +14,7 @@
 
 import { api } from "./api";
 import { useStore } from "../store";
-import type { AgentSnapshot, ChatMessage } from "../types";
+import type { AgentSnapshot, AgentSpec, ChatMessage } from "../types";
 
 const SUMMARY_PROMPT =
   "Please produce a TIGHT summary of our entire conversation so far in <= 400 words. " +
@@ -48,54 +48,82 @@ export async function compactAgent(agentId: string): Promise<CompactResult> {
 
   pushLocal(agentId, "[compacting] Got summary, killing old process…");
 
-  // 3. Kill the old process. Best-effort — even if this fails the new spawn
-  // will still proceed (different ID, no name collision because we remove
-  // from registry below).
-  try {
-    await api.killAgent(agentId);
-  } catch (e) {
-    console.warn("kill during compact failed (continuing):", e);
-  }
-
-  // Wait briefly for backend to drop the agent from the name index, otherwise
-  // the spawn will reject "name already exists".
-  await waitForAgentRemoved(oldSpec.name, 5_000);
-
-  // 4. Spawn fresh with same spec + summary appended to system prompt.
+  // 3+4+5. Reuse the shared respawn helper.
   const newSystemPrompt =
     (oldSpec.system_prompt ?? "").trimEnd() +
     "\n\n--- COMPACTED PRIOR CONTEXT (auto-summary, fresh session continues from here) ---\n" +
     summary;
 
-  const newSnap = await api.spawnAgent({
-    ...oldSpec,
-    system_prompt: newSystemPrompt,
-  });
-
-  // The backend's `created` event will upsert the new agent into the store.
-  // Wait a tick so the listener has run, then carry old messages over and
-  // append the divider.
-  await new Promise((r) => setTimeout(r, 50));
-
-  const s = useStore.getState();
-  // Replay messages: keep the user's visible history under the NEW id.
-  const target = newSnap.id;
-  for (const m of oldMessages) {
-    s.appendMessage(target, { ...m, id: crypto.randomUUID() });
-  }
-  s.appendMessage(target, {
-    id: crypto.randomUUID(),
-    role: "system" as any,
-    content: `[local] --- COMPACTED at ${new Date().toLocaleTimeString()} — context reset to ~${summary.length} chars summary. The agent remembers via system prompt; the panel above is your visual history. ---`,
-    ts: new Date().toISOString(),
-  });
-  s.setActive(target);
+  const newSnap = await respawnAgent(
+    agentId,
+    { ...oldSpec, system_prompt: newSystemPrompt },
+    `--- COMPACTED at ${new Date().toLocaleTimeString()} — context reset to ~${summary.length} chars summary. The agent remembers via system prompt; the panel above is your visual history. ---`,
+  );
 
   return {
     newAgent: newSnap,
     summary,
     carriedMessages: oldMessages.length,
   };
+}
+
+/// Replace an agent's running process with a fresh one using a new spec.
+/// Used by:
+///   - compactAgent (with summary appended to system_prompt)
+///   - the AgentSettingsDialog (when the user edits prompt/toggles/etc.)
+/// Captures + replays the visible chat history, adds a system divider so the
+/// user can see where the cut happened, and switches the active tile to the
+/// new id.
+export async function respawnAgent(
+  oldId: string,
+  newSpec: AgentSpec,
+  dividerMessage: string,
+): Promise<AgentSnapshot> {
+  const store = useStore.getState();
+  const record = store.agents[oldId];
+  if (!record) throw new Error(`agent ${oldId} not found`);
+
+  const oldMessages: ChatMessage[] = [...record.messages];
+  const oldName = record.snapshot.spec.name;
+
+  // Best-effort kill; spawn will retry-by-name once the registry clears.
+  try {
+    await api.killAgent(oldId);
+  } catch (e) {
+    console.warn("kill during respawn failed (continuing):", e);
+  }
+  await waitForAgentRemoved(oldName, 5_000);
+
+  const newSnap = await api.spawnAgent(newSpec);
+  // The backend's `created` event will upsert the new agent into the store.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const s = useStore.getState();
+  for (const m of oldMessages) {
+    s.appendMessage(newSnap.id, { ...m, id: crypto.randomUUID() });
+  }
+  s.appendMessage(newSnap.id, {
+    id: crypto.randomUUID(),
+    role: "system" as any,
+    content: `[local] ${dividerMessage}`,
+    ts: new Date().toISOString(),
+  });
+  s.setActive(newSnap.id);
+  return newSnap;
+}
+
+/// Restart an agent with a (potentially mutated) spec. No summary, no
+/// destructive operations — just a clean kill+spawn so changes to
+/// system_prompt / toggles / model take effect.
+export async function restartAgent(
+  oldId: string,
+  newSpec: AgentSpec,
+): Promise<AgentSnapshot> {
+  return respawnAgent(
+    oldId,
+    newSpec,
+    `--- RESTARTED at ${new Date().toLocaleTimeString()} — agent re-spawned with updated settings. Past messages above are visible history; the agent itself only sees its new system prompt. ---`,
+  );
 }
 
 function pushLocal(agentId: string, msg: string) {

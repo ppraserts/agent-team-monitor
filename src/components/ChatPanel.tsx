@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
@@ -8,6 +8,7 @@ import { findPreset, PRESETS } from "../lib/presets";
 import { compactAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
+import { AgentSettingsDialog } from "./AgentSettingsDialog";
 import type { ChatMessage } from "../types";
 
 /// Default model context window for the bar denominator. Sonnet/Opus are 200k,
@@ -30,6 +31,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
   );
   const [input, setInput] = useState("");
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -376,6 +378,13 @@ Available presets: ${presetList}`,
         >
           <BookOpen size={14} />
         </button>
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="text-base-500 hover:text-(--color-accent-cyan) ml-1 transition"
+          title="Edit this agent's settings (kills + restarts on save)"
+        >
+          <Cog size={14} />
+        </button>
         {onClose && (
           <button
             onClick={onClose}
@@ -426,6 +435,12 @@ Available presets: ${presetList}`,
             console.error("restart failed", e);
           }
         }}
+      />
+
+      <AgentSettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        agentId={agentId}
       />
 
       {/* Input */}

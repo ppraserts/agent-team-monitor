@@ -1,7 +1,7 @@
 import { useStore } from "../store";
 import { ArrowRight, Wrench, MessageSquare, Activity, AtSign, Loader2 } from "lucide-react";
 import { cn, statusColor } from "../lib/cn";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 interface FeedItem {
   ts: string;
@@ -18,12 +18,11 @@ interface FeedItem {
 export function TeamFeed() {
   const agents = useStore((s) => s.agents);
 
-  // Tick to refresh "fresh" highlights.
+  // Tick to refresh "fresh" highlights — but only while there IS something
+  // recent on screen. Constant 1Hz re-renders of the whole feed (which can
+  // hold ~100 items) was visibly making the chat tile flicker on hot
+  // conversations.
   const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((x) => x + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   const items: FeedItem[] = useMemo(() => {
     const all: FeedItem[] = [];
@@ -77,6 +76,16 @@ export function TeamFeed() {
     (a) => a.snapshot.status === "thinking" || a.snapshot.status === "working",
   );
 
+  // Only run the freshness ticker when there's a row created in the last 5s.
+  const hasFresh = items.some(
+    (it) => Date.now() - +new Date(it.ts) < 5000,
+  );
+  useEffect(() => {
+    if (!hasFresh) return;
+    const t = setInterval(() => setTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [hasFresh]);
+
   return (
     <div className="flex flex-col h-full bg-base-900/40 border border-base-800 rounded-lg overflow-hidden">
       {/* Header */}
@@ -124,7 +133,9 @@ export function TeamFeed() {
   );
 }
 
-function FeedRow({ item, tick: _tick }: { item: FeedItem; tick: number }) {
+const FeedRow = memo(function FeedRow({
+  item, tick: _tick,
+}: { item: FeedItem; tick: number }) {
   const ageSec = (Date.now() - +new Date(item.ts)) / 1000;
   const fresh = ageSec < 5;
   const time = new Date(item.ts).toLocaleTimeString();
@@ -203,4 +214,4 @@ function FeedRow({ item, tick: _tick }: { item: FeedItem; tick: number }) {
       </div>
     </div>
   );
-}
+});
