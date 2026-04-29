@@ -4,7 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
-import { findPreset, PRESETS } from "../lib/presets";
+import { findPreset, PRESETS, SAFETY_PROTOCOL } from "../lib/presets";
 import { compactAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
@@ -34,6 +34,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const forceStickRef = useRef(false);
 
   // Autocomplete state for `/commands` and `@mentions`.
   type SuggestItem = {
@@ -178,13 +179,24 @@ export function ChatPanel({ agentId, onClose }: Props) {
     setStuckToBottom(distance < STICK_THRESHOLD);
   };
 
+  const scrollToBottom = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  };
+
   // useLayoutEffect so the scroll happens BEFORE paint — no visible flash
   // where the user briefly sees the old position then a jump.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (stuckToBottom) {
-      el.scrollTop = el.scrollHeight;
+    if (stuckToBottom || forceStickRef.current) {
+      scrollToBottom();
+      requestAnimationFrame(() => {
+        scrollToBottom();
+        forceStickRef.current = false;
+        setStuckToBottom(true);
+      });
     }
     // If not stuck, leave scroll where the user put it. The Jump button
     // (rendered below) lets them rejoin the live tail.
@@ -192,9 +204,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
   }, [record?.messages.length]);
 
   const jumpToLatest = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    scrollToBottom();
     setStuckToBottom(true);
   };
 
@@ -272,16 +282,19 @@ Available presets: ${presetList}`,
         customName = `${customName}${i}`;
       }
       try {
+        const settings = await api.settingsGetAll().catch(() => ({} as Record<string, string>));
+        const allowMentions = settings.default_allow_mentions !== "false";
         const snap = await api.spawnAgent({
           name: customName,
           role: preset.role,
           cwd: snapshot.spec.cwd, // reuse current agent's cwd
-          system_prompt: preset.system_prompt,
+          system_prompt: `${preset.system_prompt}${SAFETY_PROTOCOL}`,
           model: null,
           color: preset.color,
-          vendor: "claude",
-          skip_permissions: false,
-          allow_mentions: true,
+          vendor: snapshot.spec.vendor ?? "claude",
+          vendor_binary: snapshot.spec.vendor_binary ?? null,
+          skip_permissions: true,
+          allow_mentions: allowMentions,
           mention_allowlist: [],
         });
         upsertAgent(snap);
@@ -335,7 +348,10 @@ Available presets: ${presetList}`,
   const submit = async () => {
     const text = input.trim();
     if (!text) return;
+    forceStickRef.current = true;
+    setStuckToBottom(true);
     setInput("");
+    requestAnimationFrame(scrollToBottom);
 
     // Slash commands are intercepted locally (don't get sent to the agent).
     if (text.startsWith("/")) {
@@ -577,6 +593,8 @@ Available presets: ${presetList}`,
             className="flex-1 resize-none bg-base-950 border border-base-700 rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
           />
           <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
             onClick={submit}
             disabled={!input.trim()}
             className="px-3 py-2 rounded-md bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center gap-1"

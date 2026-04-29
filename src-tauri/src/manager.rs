@@ -103,6 +103,13 @@ impl AgentManager {
         let adapter = make_adapter(spec.vendor.as_deref())?;
         let id = uuid::Uuid::new_v4().to_string();
 
+        if !spec.cwd.is_dir() {
+            return Err(anyhow!(
+                "working directory does not exist or is not a directory: {}",
+                spec.cwd.display()
+            ));
+        }
+
         // Patch the spec so the agent sees the live roster, including its own
         // name. This lets users name agents anything (e.g. "PM1", "PM2") and
         // still have @mention routing work.
@@ -361,7 +368,9 @@ fn spawn_stdout_reader(
             if line.trim().is_empty() {
                 continue;
             }
-            handle_parsed_event(&mgr, &agent_id, adapter.parse_event(&line)).await;
+            for event in adapter.parse_events(&line) {
+                handle_parsed_event(&mgr, &agent_id, event).await;
+            }
         }
     });
 }
@@ -485,7 +494,6 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
             }
             mgr.set_status(agent_id, AgentStatus::Idle);
         }
-        ParsedEvent::Other => {}
     }
 
     // Update last_seen on any activity (cheap; only one row touched).

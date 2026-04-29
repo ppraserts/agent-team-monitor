@@ -35,11 +35,15 @@ fn db() -> &'static Arc<Db> {
     DB.get().expect("Db not initialized")
 }
 
+fn format_error(e: anyhow::Error) -> String {
+    format!("{e:#}")
+}
+
 // ---------- Agent commands ----------
 
 #[tauri::command]
 async fn agent_spawn(spec: AgentSpec) -> Result<AgentSnapshot, String> {
-    agent_mgr().spawn(spec).await.map_err(|e| e.to_string())
+    agent_mgr().spawn(spec).await.map_err(format_error)
 }
 
 #[tauri::command]
@@ -47,17 +51,17 @@ async fn agent_resume(spec: AgentSpec, session_id: Option<String>) -> Result<Age
     agent_mgr()
         .spawn_with_resume(spec, ResumeOptions { session_id })
         .await
-        .map_err(|e| e.to_string())
+        .map_err(format_error)
 }
 
 #[tauri::command]
 async fn agent_send(agent_id: String, message: String) -> Result<(), String> {
-    agent_mgr().send(&agent_id, message).await.map_err(|e| e.to_string())
+    agent_mgr().send(&agent_id, message).await.map_err(format_error)
 }
 
 #[tauri::command]
 async fn agent_kill(agent_id: String) -> Result<(), String> {
-    agent_mgr().kill(&agent_id).await.map_err(|e| e.to_string())
+    agent_mgr().kill(&agent_id).await.map_err(format_error)
 }
 
 #[tauri::command]
@@ -69,7 +73,7 @@ fn agent_list() -> Vec<AgentSnapshot> {
 
 #[tauri::command]
 fn pty_spawn(spec: PtySpec) -> Result<PtySnapshot, String> {
-    pty_mgr().spawn(spec).map_err(|e| e.to_string())
+    pty_mgr().spawn(spec).map_err(format_error)
 }
 
 #[tauri::command]
@@ -77,17 +81,17 @@ fn pty_write(pty_id: String, data_b64: String) -> Result<(), String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_b64.as_bytes())
         .map_err(|e| e.to_string())?;
-    pty_mgr().write(&pty_id, &bytes).map_err(|e| e.to_string())
+    pty_mgr().write(&pty_id, &bytes).map_err(format_error)
 }
 
 #[tauri::command]
 fn pty_resize(pty_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    pty_mgr().resize(&pty_id, cols, rows).map_err(|e| e.to_string())
+    pty_mgr().resize(&pty_id, cols, rows).map_err(format_error)
 }
 
 #[tauri::command]
 fn pty_kill(pty_id: String) -> Result<(), String> {
-    pty_mgr().kill(&pty_id).map_err(|e| e.to_string())
+    pty_mgr().kill(&pty_id).map_err(format_error)
 }
 
 #[tauri::command]
@@ -109,6 +113,20 @@ struct VendorInfo {
     version: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeCheck {
+    name: String,
+    binary: Option<String>,
+    version: Option<String>,
+    ok: bool,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeDiagnostics {
+    checks: Vec<RuntimeCheck>,
+}
+
 #[tauri::command]
 fn list_available_vendors() -> Vec<VendorInfo> {
     let candidates = [
@@ -124,6 +142,43 @@ fn list_available_vendors() -> Vec<VendorInfo> {
         }
     }
     out
+}
+
+#[tauri::command]
+fn runtime_diagnostics() -> RuntimeDiagnostics {
+    let checks = vec![
+        runtime_check("node", &["--version"], false),
+        runtime_check("npm", &["--version"], true),
+        runtime_check("bun", &["--version"], false),
+        runtime_check("cargo", &["--version"], false),
+        runtime_check("rustc", &["--version"], false),
+        runtime_check("claude", &["--version"], true),
+        runtime_check("npx", &["--version"], true),
+    ];
+    RuntimeDiagnostics { checks }
+}
+
+fn runtime_check(name: &str, args: &[&str], required: bool) -> RuntimeCheck {
+    match which_with_version(name, args) {
+        Some((binary, version)) => RuntimeCheck {
+            name: name.to_string(),
+            binary: Some(binary),
+            version,
+            ok: true,
+            message: None,
+        },
+        None => RuntimeCheck {
+            name: name.to_string(),
+            binary: None,
+            version: None,
+            ok: !required,
+            message: Some(if required {
+                "required runtime not found on PATH".to_string()
+            } else {
+                "optional runtime not found on PATH".to_string()
+            }),
+        },
+    }
 }
 
 fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<String>)> {
@@ -445,6 +500,7 @@ pub fn run() {
             pty_list,
             list_external_sessions,
             list_available_vendors,
+            runtime_diagnostics,
             home_dir,
             ccusage_report,
             skills_list,

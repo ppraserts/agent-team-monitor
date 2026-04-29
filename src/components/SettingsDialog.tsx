@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink, Zap, Archive,
+  MonitorCheck,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost, fmtNumber } from "../lib/cn";
 import { PLAN_DEFAULTS, type PlanTier } from "../lib/planLimits";
-import type { UsageStats } from "../types";
+import type { RuntimeDiagnostics, UsageStats } from "../types";
 
 interface Props {
   open: boolean;
@@ -32,9 +33,11 @@ export function applyTheme(theme: ThemeKey) {
 export function SettingsDialog({ open, onClose }: Props) {
   const [theme, setTheme] = useState<ThemeKey>("cyan");
   const [defaultCwd, setDefaultCwd] = useState("");
+  const [defaultClaudeBin, setDefaultClaudeBin] = useState("");
   const [defaultSkipPerms, setDefaultSkipPerms] = useState(false);
   const [defaultAllowMentions, setDefaultAllowMentions] = useState(true);
   const [stats, setStats] = useState<UsageStats | null>(null);
+  const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [dataPath, setDataPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -61,12 +64,15 @@ export function SettingsDialog({ open, onClose }: Props) {
       api.settingsGetAll(),
       api.usageStats(),
       api.dataPath(),
-    ]).then(([s, st, dp]) => {
+      api.runtimeDiagnostics(),
+    ]).then(([s, st, dp, diag]) => {
       setTheme((s.theme as ThemeKey) || "cyan");
       setDefaultCwd(s.default_cwd || "");
+      setDefaultClaudeBin(s.default_claude_bin || "");
       setDefaultSkipPerms(s.default_skip_perms === "true");
       setDefaultAllowMentions(s.default_allow_mentions !== "false");
       setStats(st);
+      setDiagnostics(diag);
       setDataPath(dp);
       applyTheme((s.theme as ThemeKey) || "cyan");
 
@@ -188,6 +194,15 @@ export function SettingsDialog({ open, onClose }: Props) {
                 className="input font-mono text-xs"
               />
             </Field>
+            <Field label="Claude binary override">
+              <input
+                value={defaultClaudeBin}
+                onChange={(e) => setDefaultClaudeBin(e.target.value)}
+                onBlur={() => save("default_claude_bin", defaultClaudeBin.trim())}
+                placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+                className="input font-mono text-xs"
+              />
+            </Field>
 
             <ToggleRow
               checked={defaultAllowMentions}
@@ -208,6 +223,49 @@ export function SettingsDialog({ open, onClose }: Props) {
               label="--dangerously-skip-permissions by default"
               hint="DANGER: skips Claude's tool prompts. Combine with @mention routing only for trusted local work."
             />
+          </Section>
+
+          {/* ----- Runtime diagnostics ----- */}
+          <Section icon={<MonitorCheck size={12} />} title="Windows runtime diagnostics">
+            {diagnostics ? (
+              <div className="space-y-1">
+                {diagnostics.checks.map((check) => (
+                  <div
+                    key={check.name}
+                    className={cn(
+                      "grid grid-cols-[72px_1fr] gap-2 rounded-md border px-2 py-1.5 text-xs",
+                      check.ok
+                        ? "border-base-700/50 bg-base-800/30"
+                        : "border-(--color-accent-red)/40 bg-(--color-accent-red)/10",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "font-mono font-semibold",
+                        check.ok ? "text-(--color-accent-green)" : "text-(--color-accent-red)",
+                      )}
+                    >
+                      {check.name}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-[11px]">
+                        {check.binary ?? check.message ?? "not found"}
+                      </div>
+                      {check.version && (
+                        <div className="truncate text-[10px] text-base-500">
+                          {check.version}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-xs text-base-500">loading...</div>
+            )}
+            <div className="text-[10px] text-base-500">
+              Required for the full app: npm/npx, Claude CLI, Cargo/Rust. Bun is optional.
+            </div>
           </Section>
 
           {/* ----- Stats ----- */}

@@ -30,6 +30,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
   const [allowlist, setAllowlist] = useState("");
   const [skipPerms, setSkipPerms] = useState(false);
   const [model, setModel] = useState("");
+  const [vendorBinary, setVendorBinary] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,6 +54,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
     setRequireApproval(hadProtocol);
     setSkipPerms(!hadProtocol && !!s.skip_permissions);
     setModel(s.model ?? "");
+    setVendorBinary(s.vendor_binary ?? "");
     setError(null);
   }, [open, record]);
 
@@ -74,6 +76,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
         model: model.trim() || null,
         color: record.snapshot.spec.color,
         vendor: record.snapshot.spec.vendor ?? "claude",
+        vendor_binary: vendorBinary.trim() || null,
         skip_permissions: effectiveSkipPerms,
         allow_mentions: allowMentions,
         mention_allowlist: allowlist
@@ -175,8 +178,8 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
               checked={requireApproval}
               onChange={setRequireApproval}
               icon={<ShieldCheck size={12} />}
-              label="Require user approval for destructive ops"
-              hint="Adds the proposal protocol + implicitly enables --skip-permissions so tools work after Approve."
+              label="Ask for approval before destructive ops (model-mediated)"
+              hint="Adds the proposal protocol and implicitly enables --skip-permissions so approved tools can run. This is not a host-level sandbox."
             />
 
             <ToggleRow
@@ -205,16 +208,25 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
                 icon={<ShieldAlert size={12} />}
                 danger
                 label="Raw --dangerously-skip-permissions (no approval gate)"
-                hint="DANGER: every Edit / Write / Bash call runs without asking. Prefer 'Require approval' above."
+                hint="DANGER: every Edit / Write / Bash call runs without asking. Use only for trusted local automation."
               />
             )}
             {requireApproval && (
               <div className="text-[10px] text-base-500 ml-6 -mt-1">
-                (skip-permissions is implicitly ON; the approval cards in chat
-                are what gate destructive actions.)
+                (skip-permissions is implicitly ON. Approval cards are enforced
+                by the agent protocol, not by a host sandbox.)
               </div>
             )}
           </div>
+
+          <Field label="Claude binary override (optional)">
+            <input
+              value={vendorBinary}
+              onChange={(e) => setVendorBinary(e.target.value)}
+              placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+              className="input font-mono text-xs"
+            />
+          </Field>
 
           {error && (
             <div className="text-xs text-(--color-accent-red) bg-(--color-accent-red)/10 border border-(--color-accent-red)/30 rounded-md px-2 py-1.5">

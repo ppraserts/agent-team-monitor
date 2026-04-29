@@ -102,6 +102,7 @@ impl Db {
                 model           TEXT,
                 color           TEXT,
                 system_prompt   TEXT,
+                vendor_binary   TEXT,
                 skip_permissions INTEGER NOT NULL DEFAULT 0,
                 allow_mentions  INTEGER NOT NULL DEFAULT 1,
                 mention_allowlist TEXT NOT NULL DEFAULT '[]',
@@ -154,6 +155,7 @@ impl Db {
             "#,
         )
         .context("migrate schema")?;
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN vendor_binary TEXT", []);
         Ok(())
     }
 
@@ -167,10 +169,10 @@ impl Db {
             r#"
             INSERT INTO agents (
                 id, name, role, cwd, vendor, model, color, system_prompt,
-                skip_permissions, allow_mentions, mention_allowlist,
-                created_at, last_seen_at
+                vendor_binary, skip_permissions, allow_mentions,
+                mention_allowlist, created_at, last_seen_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 role = excluded.role,
@@ -179,6 +181,7 @@ impl Db {
                 model = excluded.model,
                 color = excluded.color,
                 system_prompt = excluded.system_prompt,
+                vendor_binary = excluded.vendor_binary,
                 skip_permissions = excluded.skip_permissions,
                 allow_mentions = excluded.allow_mentions,
                 mention_allowlist = excluded.mention_allowlist,
@@ -193,6 +196,7 @@ impl Db {
                 spec.model,
                 spec.color,
                 spec.system_prompt,
+                spec.vendor_binary,
                 spec.skip_permissions as i64,
                 spec.allow_mentions as i64,
                 allowlist_json,
@@ -226,8 +230,8 @@ impl Db {
             r#"
             SELECT
                 a.id, a.name, a.role, a.cwd, a.vendor, a.model, a.color,
-                a.system_prompt, a.skip_permissions, a.allow_mentions,
-                a.mention_allowlist, a.session_id, a.last_seen_at,
+                a.system_prompt, a.vendor_binary, a.skip_permissions,
+                a.allow_mentions, a.mention_allowlist, a.session_id, a.last_seen_at,
                 COALESCE((SELECT COUNT(*) FROM messages WHERE agent_id = a.id), 0) AS msg_count,
                 COALESCE((SELECT SUM(input_tokens) FROM usage_events WHERE agent_id = a.id), 0) AS in_tok,
                 COALESCE((SELECT SUM(output_tokens) FROM usage_events WHERE agent_id = a.id), 0) AS out_tok,
@@ -242,10 +246,10 @@ impl Db {
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cwd_str: String = row.get(3)?;
-            let allowlist_json: String = row.get(10)?;
+            let allowlist_json: String = row.get(11)?;
             let allowlist: Vec<String> =
                 serde_json::from_str(&allowlist_json).unwrap_or_default();
-            let last_seen_str: String = row.get(12)?;
+            let last_seen_str: String = row.get(13)?;
             let spec = AgentSpec {
                 name: row.get(1)?,
                 role: row.get(2)?,
@@ -254,24 +258,25 @@ impl Db {
                 model: row.get(5)?,
                 color: row.get(6)?,
                 system_prompt: row.get(7)?,
-                skip_permissions: row.get::<_, i64>(8)? != 0,
-                allow_mentions: row.get::<_, i64>(9)? != 0,
+                vendor_binary: row.get(8)?,
+                skip_permissions: row.get::<_, i64>(9)? != 0,
+                allow_mentions: row.get::<_, i64>(10)? != 0,
                 mention_allowlist: allowlist,
             };
             let usage = AgentUsage {
-                input_tokens: row.get::<_, i64>(14)? as u64,
-                output_tokens: row.get::<_, i64>(15)? as u64,
-                cache_read_tokens: row.get::<_, i64>(16)? as u64,
-                cache_creation_tokens: row.get::<_, i64>(17)? as u64,
-                total_cost_usd: row.get::<_, f64>(18)?,
-                turns: row.get::<_, i64>(19)? as u64,
+                input_tokens: row.get::<_, i64>(15)? as u64,
+                output_tokens: row.get::<_, i64>(16)? as u64,
+                cache_read_tokens: row.get::<_, i64>(17)? as u64,
+                cache_creation_tokens: row.get::<_, i64>(18)? as u64,
+                total_cost_usd: row.get::<_, f64>(19)?,
+                turns: row.get::<_, i64>(20)? as u64,
             };
             Ok(HistoryAgent {
                 id: row.get(0)?,
                 spec,
-                session_id: row.get(11)?,
+                session_id: row.get(12)?,
                 last_seen_at: parse_ts(&last_seen_str),
-                message_count: row.get::<_, i64>(13)? as u64,
+                message_count: row.get::<_, i64>(14)? as u64,
                 usage,
             })
         })?;
@@ -428,18 +433,6 @@ impl Db {
     }
 
     // ---------------- settings ----------------
-
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock();
-        let v: Option<String> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                params![key],
-                |r| r.get(0),
-            )
-            .ok();
-        Ok(v)
-    }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         let conn = self.conn.lock();

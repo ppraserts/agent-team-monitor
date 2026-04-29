@@ -1,5 +1,13 @@
 import { useStore } from "../store";
-import { ArrowRight, Wrench, MessageSquare, Activity, AtSign, Loader2 } from "lucide-react";
+import {
+  ArrowRight,
+  Wrench,
+  Activity,
+  AtSign,
+  Loader2,
+  Bot,
+  UserRound,
+} from "lucide-react";
 import { cn, statusColor } from "../lib/cn";
 import { memo, useEffect, useMemo, useState } from "react";
 
@@ -182,34 +190,67 @@ const FeedRow = memo(function FeedRow({
   }
   // message (assistant or plain user)
   const isAssistant = item.role === "assistant";
+  const tone = isAssistant ? "agent" : "user";
   return (
     <div
       className={cn(
-        "rounded-md px-2 py-1.5 transition",
-        fresh && isAssistant
-          ? "bg-(--color-accent-cyan)/10 border border-(--color-accent-cyan)/30"
-          : "bg-base-800/40",
+        "rounded-md border px-2 py-1.5 transition",
+        tone === "agent"
+          ? fresh
+            ? "bg-(--color-accent-cyan)/10 border-(--color-accent-cyan)/35"
+            : "bg-base-800/35 border-base-700/45"
+          : fresh
+          ? "bg-(--color-accent-green)/10 border-(--color-accent-green)/35"
+          : "bg-base-950/45 border-base-800",
       )}
     >
-      <div className="flex items-center gap-1.5 text-[11px] mb-0.5">
+      <div className="flex items-center gap-1.5 text-[11px] mb-1">
         <span
           className={cn("w-1.5 h-1.5 rounded-full", statusColor(item.status ?? "idle"))}
         />
-        <MessageSquare size={11} className="text-base-500" />
-        <span className="font-semibold text-base-200">{item.agentName}</span>
         <span
           className={cn(
-            "text-[9px] px-1 rounded",
-            isAssistant
-              ? "bg-base-700 text-base-300"
-              : "bg-base-800 text-base-500",
+            "h-5 w-5 rounded-md border flex items-center justify-center",
+            tone === "agent"
+              ? "bg-(--color-accent-cyan)/10 border-(--color-accent-cyan)/30 text-(--color-accent-cyan)"
+              : "bg-(--color-accent-green)/10 border-(--color-accent-green)/30 text-(--color-accent-green)",
           )}
         >
-          {item.role}
+          {tone === "agent" ? <Bot size={12} /> : <UserRound size={12} />}
+        </span>
+        <span
+          className={cn(
+            "text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide",
+            tone === "agent"
+              ? "bg-(--color-accent-cyan)/15 text-(--color-accent-cyan)"
+              : "bg-(--color-accent-green)/15 text-(--color-accent-green)",
+          )}
+        >
+          {tone === "agent" ? "agent" : "user"}
+        </span>
+        <span className="font-semibold text-base-200">
+          {tone === "agent" ? item.agentName : "You"}
+        </span>
+        <ArrowRight size={10} className="text-base-600" />
+        <span className="text-base-400">
+          {tone === "agent" ? "You" : item.agentName}
+        </span>
+        <span
+          className={cn(
+            "ml-1 text-[9px] px-1 rounded",
+            fresh ? "bg-(--color-accent-cyan)/20 text-(--color-accent-cyan)" : "hidden",
+          )}
+        >
+          LIVE
         </span>
         <span className="ml-auto text-[10px] text-base-600 font-mono">{time}</span>
       </div>
-      <div className="text-xs text-base-400 whitespace-pre-wrap line-clamp-2">
+      <div
+        className={cn(
+          "text-xs whitespace-pre-wrap line-clamp-2",
+          tone === "agent" ? "text-base-300" : "text-base-400",
+        )}
+      >
         {item.content}
       </div>
     </div>

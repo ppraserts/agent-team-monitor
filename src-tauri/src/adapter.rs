@@ -1,11 +1,10 @@
 //! Vendor-agnostic agent adapter trait.
 //!
-//! Each vendor (Claude, Gemini, MiniMax, …) implements `AgentAdapter` to
-//! produce a child-process command, encode user messages onto stdin, and parse
-//! event lines from stdout into a normalized `ParsedEvent`. The rest of
-//! `manager.rs` is vendor-neutral.
+//! Each vendor implements `AgentAdapter` to produce a child-process command,
+//! encode user messages onto stdin, and parse stdout lines into normalized
+//! `ParsedEvent`s. The rest of `manager.rs` stays vendor-neutral.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::process::Command;
 
 use crate::agent::{AgentSpec, AgentUsage, ResumeOptions};
@@ -13,9 +12,9 @@ use crate::agent::{AgentSpec, AgentUsage, ResumeOptions};
 /// Normalized event parsed from a vendor's stdout stream.
 #[derive(Debug, Clone)]
 pub enum ParsedEvent {
-    /// Session/thread initialized — capture vendor session id.
+    /// Session/thread initialized; capture vendor session id.
     SessionInit { session_id: String },
-    /// Final assistant text for this turn (or a streamed delta — adapter decides).
+    /// Final assistant text for this turn, or a streamed delta if an adapter chooses.
     AssistantText { text: String },
     /// A tool invocation by the assistant.
     ToolUse {
@@ -27,26 +26,22 @@ pub enum ParsedEvent {
         usage: AgentUsage,
         duration_ms: u64,
     },
-    /// Anything we don't care about yet.
-    Other,
 }
 
 pub trait AgentAdapter: Send + Sync + 'static {
-    /// Vendor key used in `AgentSpec.vendor` (e.g. "claude", "gemini").
+    /// Vendor key used in `AgentSpec.vendor`, e.g. "claude".
     fn vendor(&self) -> &'static str;
 
     /// Build a `Command` ready to spawn for this spec.
-    /// Stdio piping + working dir are set by the manager — adapters only
-    /// configure binary, args, and env. `resume` carries optional re-attach
-    /// parameters (e.g. Claude `--resume <session_id>`).
+    /// Stdio piping + working dir are set by the manager; adapters only
+    /// configure binary, args, and env.
     fn build_command(&self, spec: &AgentSpec, resume: &ResumeOptions) -> Result<Command>;
 
     /// Encode a user message into a single stdin line (must end with `\n`).
     fn encode_user_message(&self, msg: &str) -> String;
 
-    /// Parse a single line of stdout into a `ParsedEvent`.
-    /// Return `Other` for lines you don't recognize.
-    fn parse_event(&self, line: &str) -> ParsedEvent;
+    /// Parse a single stdout line into zero or more normalized events.
+    fn parse_events(&self, line: &str) -> Vec<ParsedEvent>;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,7 +51,7 @@ pub trait AgentAdapter: Send + Sync + 'static {
 pub struct ClaudeStreamJsonAdapter;
 
 impl ClaudeStreamJsonAdapter {
-    fn which() -> Result<String> {
+    pub fn which() -> Result<String> {
         if let Ok(path) = std::env::var("CLAUDE_BIN") {
             return Ok(path);
         }
@@ -81,7 +76,9 @@ impl ClaudeStreamJsonAdapter {
                 }
             }
         }
-        Ok("claude".to_string())
+        Err(anyhow!(
+            "Claude CLI was not found. Install Claude Code and make sure `claude.cmd` is on PATH, or set CLAUDE_BIN / the agent runtime binary path to the full claude.cmd path."
+        ))
     }
 }
 
@@ -91,11 +88,19 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
     }
 
     fn build_command(&self, spec: &AgentSpec, resume: &ResumeOptions) -> Result<Command> {
-        let bin = Self::which()?;
+        let bin = spec
+            .vendor_binary
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .map(Ok)
+            .unwrap_or_else(Self::which)?;
         let mut cmd = Command::new(bin);
         cmd.arg("--print")
-            .arg("--output-format").arg("stream-json")
-            .arg("--input-format").arg("stream-json")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--input-format")
+            .arg("stream-json")
             .arg("--verbose");
 
         if let Some(sid) = &resume.session_id {
@@ -108,7 +113,7 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
             cmd.arg("--model").arg(model);
         }
         if let Some(sp) = &spec.system_prompt {
-            cmd.arg("--append-system-prompt").arg(sp);
+            cmd.arg("--append-system-prompt").arg(prompt_arg_for_process(sp));
         }
         Ok(cmd)
     }
@@ -121,90 +126,126 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
         format!("{}\n", payload)
     }
 
-    fn parse_event(&self, line: &str) -> ParsedEvent {
+    fn parse_events(&self, line: &str) -> Vec<ParsedEvent> {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => return ParsedEvent::Other,
+            Err(_) => return Vec::new(),
         };
         let etype = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
         match etype {
             "system" => {
                 if v.get("subtype").and_then(|x| x.as_str()) == Some("init") {
                     if let Some(sid) = v.get("session_id").and_then(|x| x.as_str()) {
-                        return ParsedEvent::SessionInit { session_id: sid.to_string() };
+                        return vec![ParsedEvent::SessionInit {
+                            session_id: sid.to_string(),
+                        }];
                     }
                 }
-                ParsedEvent::Other
+                Vec::new()
             }
-            "assistant" => {
-                let mut text = String::new();
-                if let Some(content) = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                {
-                    for block in content {
-                        let btype = block.get("type").and_then(|x| x.as_str()).unwrap_or("");
-                        match btype {
-                            "text" => {
-                                if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
-                                    if !text.is_empty() {
-                                        text.push('\n');
-                                    }
-                                    text.push_str(t);
-                                }
-                            }
-                            "tool_use" => {
-                                let tool = block
-                                    .get("name").and_then(|x| x.as_str())
-                                    .unwrap_or("?").to_string();
-                                let input = block.get("input").cloned()
-                                    .unwrap_or(serde_json::Value::Null);
-                                // We can only return one event per call; emit text first
-                                // (if any) by NOT preserving multi-event output here.
-                                // For tool_use we return ToolUse; if both text and tool_use
-                                // exist in the same message, the manager will see one of them
-                                // per stream line. In practice Claude usually emits them in
-                                // separate "assistant" events; if not, prefer tool_use signal
-                                // since text without trailing tool_use is uncommon.
-                                if text.is_empty() {
-                                    return ParsedEvent::ToolUse { tool, input };
-                                }
-                                // We have text already — fallthrough emits text;
-                                // tool_use will arrive in the next "assistant" event
-                                // in practice. (Adapters will be extended to emit
-                                // multiple events per line in v2.)
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                // Trim leading/trailing blank lines + whitespace. Claude often
-                // emits leading newlines when it's responding after a header /
-                // system-style preamble (e.g. our roster injection), which
-                // would otherwise show as a tall blank gap at the top of the
-                // chat bubble.
-                let cleaned = text.trim().to_string();
-                if cleaned.is_empty() {
-                    ParsedEvent::Other
-                } else {
-                    ParsedEvent::AssistantText { text: cleaned }
-                }
-            }
-            "result" => {
-                let mut usage = AgentUsage::default();
-                if let Some(u) = v.get("usage") {
-                    usage.input_tokens = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                    usage.output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                    usage.cache_read_tokens = u.get("cache_read_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                    usage.cache_creation_tokens = u.get("cache_creation_input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                }
-                usage.total_cost_usd = v.get("total_cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                let duration_ms = v.get("duration_ms").and_then(|x| x.as_u64()).unwrap_or(0);
-                ParsedEvent::Result { usage, duration_ms }
-            }
-            _ => ParsedEvent::Other,
+            "assistant" => parse_assistant_events(&v),
+            "result" => vec![parse_result_event(&v)],
+            _ => Vec::new(),
         }
+    }
+}
+
+fn parse_assistant_events(v: &serde_json::Value) -> Vec<ParsedEvent> {
+    let mut text = String::new();
+    let mut events = Vec::new();
+
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return events;
+    };
+
+    for block in content {
+        let btype = block.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        match btype {
+            "text" => {
+                if let Some(t) = block.get("text").and_then(|x| x.as_str()) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(t);
+                }
+            }
+            "tool_use" => {
+                push_text_event(&mut events, &mut text);
+                let tool = block
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                events.push(ParsedEvent::ToolUse { tool, input });
+            }
+            _ => {}
+        }
+    }
+
+    push_text_event(&mut events, &mut text);
+    events
+}
+
+fn push_text_event(events: &mut Vec<ParsedEvent>, text: &mut String) {
+    let cleaned = text.trim().to_string();
+    if !cleaned.is_empty() {
+        events.push(ParsedEvent::AssistantText { text: cleaned });
+        text.clear();
+    }
+}
+
+fn parse_result_event(v: &serde_json::Value) -> ParsedEvent {
+    let mut usage = AgentUsage::default();
+    if let Some(u) = v.get("usage") {
+        usage.input_tokens = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        usage.output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+        usage.cache_read_tokens = u
+            .get("cache_read_input_tokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+        usage.cache_creation_tokens = u
+            .get("cache_creation_input_tokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0);
+    }
+    usage.total_cost_usd = v
+        .get("total_cost_usd")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let duration_ms = v.get("duration_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+    ParsedEvent::Result { usage, duration_ms }
+}
+
+fn prompt_arg_for_process(prompt: &str) -> String {
+    #[cfg(windows)]
+    {
+        // npm-installed CLIs are often .cmd batch shims. Passing multiline
+        // strings with shell metacharacters like < and > through a batch file
+        // can fail before the real node CLI starts ("batch file arguments are
+        // invalid"). Keep the prompt semantically readable but make it a
+        // single command-line argument that the Windows batch layer accepts.
+        prompt
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("<<", "[[")
+            .replace(">>", "]]")
+    }
+    #[cfg(not(windows))]
+    {
+        prompt.to_string()
     }
 }
 

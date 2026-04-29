@@ -18,6 +18,8 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
+use crate::adapter::ClaudeStreamJsonAdapter;
+
 const PTY_OUTPUT: &str = "pty://output";
 const PTY_EXIT: &str = "pty://exit";
 
@@ -98,8 +100,7 @@ impl PtyManager {
             .context("openpty failed")?;
 
         let program = spec.program.clone().unwrap_or_else(|| {
-            #[cfg(windows)] { "claude.cmd".to_string() }
-            #[cfg(not(windows))] { "claude".to_string() }
+            ClaudeStreamJsonAdapter::which().unwrap_or_else(|_| "claude".to_string())
         });
 
         let mut cmd = CommandBuilder::new(&program);

@@ -63,6 +63,8 @@ export default function App() {
   const applyUsage = useStore((s) => s.applyUsage);
   const setHomeDir = useStore((s) => s.setHomeDir);
   const setVendors = useStore((s) => s.setVendors);
+  const removeAgent = useStore((s) => s.removeAgent);
+  const removePty = useStore((s) => s.removePty);
   const layout = useStore((s) => s.layout);
   const agents = useStore((s) => s.agents);
   const ptys = useStore((s) => s.ptys);
@@ -160,6 +162,7 @@ export default function App() {
           // Drop any board-card linkage so the card stops showing
           // "working" once the underlying process is gone.
           useStore.getState().unlinkAgent(ev.agent_id);
+          removeAgent(ev.agent_id);
           break;
       }
     }).then((u) => {
@@ -176,7 +179,25 @@ export default function App() {
       unlistenRef.current = null;
       u?.();
     };
-  }, [upsertAgent, setStatus, appendMessage, appendToolUse, applyUsage]);
+  }, [upsertAgent, setStatus, appendMessage, appendToolUse, applyUsage, removeAgent]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | null = null;
+    listen<{ pty_id: string; code: number | null }>("pty://exit", (e) => {
+      removePty(e.payload.pty_id);
+    }).then((u) => {
+      if (cancelled) {
+        u();
+      } else {
+        unlisten = u;
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [removePty]);
 
   const tiles = layout.filter((id) => agents[id] || ptys[id]);
 

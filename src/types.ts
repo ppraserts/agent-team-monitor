@@ -14,6 +14,7 @@ export interface AgentSpec {
   model?: string | null;
   color?: string | null;
   vendor?: string | null;
+  vendor_binary?: string | null;
   // Security toggles (defaults are safe — opt-in to relax).
   skip_permissions?: boolean;
   allow_mentions?: boolean;
@@ -104,6 +105,18 @@ export interface VendorInfo {
   name: string;
   binary: string;
   version: string | null;
+}
+
+export interface RuntimeCheck {
+  name: string;
+  binary: string | null;
+  version: string | null;
+  ok: boolean;
+  message: string | null;
+}
+
+export interface RuntimeDiagnostics {
+  checks: RuntimeCheck[];
 }
 
 export interface ExternalSession {

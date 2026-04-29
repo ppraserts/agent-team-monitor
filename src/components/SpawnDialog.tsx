@@ -22,6 +22,7 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [tab, setTab] = useState<"agent" | "terminal">("agent");
   const [vendors, setVendors] = useState<VendorInfo[]>([]);
   const [vendor, setVendor] = useState<string>("claude");
+  const [vendorBinary, setVendorBinary] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [cwd, setCwd] = useState("");
@@ -45,6 +46,7 @@ export function SpawnDialog({ open, onClose }: Props) {
       if (s.default_skip_perms != null) setSkipPerms(s.default_skip_perms === "true");
       if (s.default_allow_mentions != null)
         setAllowMentions(s.default_allow_mentions !== "false");
+      if (s.default_claude_bin != null) setVendorBinary(s.default_claude_bin);
     }).catch(() => {});
     api.presetsList().then(setCustomPresets).catch(() => {});
   }, [open]);
@@ -112,7 +114,8 @@ export function SpawnDialog({ open, onClose }: Props) {
           system_prompt: finalPrompt || null,
           model: null,
           color: null,
-          vendor: "claude",
+          vendor,
+          vendor_binary: vendorBinary.trim() || null,
           skip_permissions: effectiveSkipPerms,
           allow_mentions: allowMentions,
           mention_allowlist: allowlist
@@ -145,7 +148,7 @@ export function SpawnDialog({ open, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-950/80 backdrop-blur-sm">
-      <div className="glass rounded-xl w-[560px] max-w-[92vw] overflow-hidden">
+      <div className="glass rounded-xl w-[560px] max-w-[92vw] max-h-[90vh] overflow-hidden flex flex-col">
         <div className="px-4 py-3 border-b border-base-800 flex items-center justify-between">
           <div className="text-sm font-semibold tracking-wide">SPAWN</div>
           <button onClick={onClose} className="text-base-500 hover:text-base-200">
@@ -153,7 +156,7 @@ export function SpawnDialog({ open, onClose }: Props) {
           </button>
         </div>
 
-        <div className="px-4 pt-3">
+        <div className="px-4 pt-3 shrink-0">
           <div className="flex gap-1 p-1 bg-base-900/60 rounded-md w-fit">
             <TabBtn active={tab === "agent"} onClick={() => setTab("agent")}>
               <Bot size={12} /> Headless Agent
@@ -164,7 +167,7 @@ export function SpawnDialog({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="p-4 space-y-3">
+        <div className="p-4 space-y-3 overflow-y-auto min-h-0">
           {tab === "agent" && (
             <>
               <Field label="Quick presets — full software team">
@@ -248,6 +251,37 @@ export function SpawnDialog({ open, onClose }: Props) {
                   className="input"
                 />
               </Field>
+              <Field label="Agent runtime">
+                <select
+                  value={vendor}
+                  onChange={(e) => setVendor(e.target.value)}
+                  className="input"
+                >
+                  {vendors
+                    .filter((v) => v.name === "claude")
+                    .map((v) => (
+                      <option key={v.name} value={v.name}>
+                        {v.name} - {v.binary}
+                      </option>
+                    ))}
+                  {!vendors.some((v) => v.name === "claude") && (
+                    <option value="claude">claude - resolved at spawn time</option>
+                  )}
+                </select>
+              </Field>
+              {vendor === "claude" && (
+                <Field label="Claude binary override (optional)">
+                  <input
+                    value={vendorBinary}
+                    onChange={(e) => setVendorBinary(e.target.value)}
+                    onBlur={() =>
+                      api.settingsSet("default_claude_bin", vendorBinary.trim()).catch(() => {})
+                    }
+                    placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+                    className="input font-mono text-xs"
+                  />
+                </Field>
+              )}
             </>
           )}
 
@@ -320,8 +354,8 @@ export function SpawnDialog({ open, onClose }: Props) {
                 checked={requireApproval}
                 onChange={setRequireApproval}
                 icon={<ShieldCheck size={12} />}
-                label="Require user approval for destructive ops (recommended)"
-                hint="Agent emits a <<PROPOSAL>>…<<END_PROPOSAL>> block before any tool that writes / commits / installs / deploys, and waits. The chat panel renders an inline Approve / Deny card. NOTE: this implicitly turns ON --dangerously-skip-permissions because the proposal flow IS the permission gate — without it the tools would fail silently in stream-json mode (no OS popups exist here)."
+                label="Ask for approval before destructive ops (model-mediated)"
+                hint="The agent is instructed to emit <<PROPOSAL>>...<<END_PROPOSAL>> before write / commit / install / deploy work. This implicitly turns ON --dangerously-skip-permissions so approved tools can run. It is not a host-level sandbox; use only with agents you trust."
               />
 
               {!requireApproval && (
@@ -331,13 +365,13 @@ export function SpawnDialog({ open, onClose }: Props) {
                   icon={<ShieldAlert size={12} />}
                   danger
                   label="Raw --dangerously-skip-permissions (no approval gate)"
-                  hint="DANGER: every Edit / Write / Bash call runs WITHOUT asking. Use only for trusted local automation. If you want safety, prefer 'Require approval' above instead — it lets tools run only after you click Approve in chat."
+                  hint="DANGER: every Edit / Write / Bash call runs WITHOUT asking. Use only for trusted local automation."
                 />
               )}
               {requireApproval && (
                 <div className="text-[10px] text-base-500 ml-6 -mt-1">
-                  (skip-permissions is implicitly ON; the approval cards in chat are
-                  what gate destructive actions.)
+                  (skip-permissions is implicitly ON. Approval cards are enforced
+                  by the agent protocol, not by a host sandbox.)
                 </div>
               )}
             </div>
@@ -350,7 +384,7 @@ export function SpawnDialog({ open, onClose }: Props) {
           )}
         </div>
 
-        <div className="px-4 py-3 border-t border-base-800 flex justify-between items-center gap-2">
+        <div className="px-4 py-3 border-t border-base-800 flex justify-between items-center gap-2 shrink-0 bg-base-950/95">
           {tab === "agent" ? (
             <button
               onClick={saveAsPreset}

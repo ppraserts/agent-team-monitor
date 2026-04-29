@@ -16,6 +16,8 @@ pub struct AgentSpec {
     /// Vendor key — selects the AgentAdapter (default: "claude").
     #[serde(default)]
     pub vendor: Option<String>,
+    #[serde(default)]
+    pub vendor_binary: Option<String>,
 
     // ----- Security -----
     /// If true, pass `--dangerously-skip-permissions` to the CLI.
