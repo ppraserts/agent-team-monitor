@@ -241,6 +241,10 @@ export interface BoardColumn {
   board_id: number;
   title: string;
   color: string | null;
+  description: string | null;
+  entry_criteria: string | null;
+  exit_criteria: string | null;
+  allowed_next_column_ids: number[];
   position: number;
 }
 

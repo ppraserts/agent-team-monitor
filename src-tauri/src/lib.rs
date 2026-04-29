@@ -427,8 +427,23 @@ fn columns_update(
     id: i64,
     title: String,
     color: Option<String>,
+    description: Option<String>,
+    entry_criteria: Option<String>,
+    exit_criteria: Option<String>,
+    allowed_next_column_ids: Vec<i64>,
 ) -> Result<BoardColumn, String> {
-    db().with_conn(|c| boards::update_column(c, id, &title, color.as_deref()))
+    db().with_conn(|c| {
+        boards::update_column(
+            c,
+            id,
+            &title,
+            color.as_deref(),
+            description.as_deref(),
+            entry_criteria.as_deref(),
+            exit_criteria.as_deref(),
+            &allowed_next_column_ids,
+        )
+    })
         .map_err(|e| e.to_string())
 }
 #[tauri::command]

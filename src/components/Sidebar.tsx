@@ -1,6 +1,17 @@
 import { useEffect, useState } from "react";
 import {
-  Bot, Plus, Terminal, Folder, Activity, Zap, History, RotateCcw, Settings, KanbanSquare,
+  Bot,
+  Plus,
+  Terminal,
+  Folder,
+  Activity,
+  Zap,
+  History,
+  RotateCcw,
+  Settings,
+  KanbanSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { Logo } from "./Logo";
 import { useShallow } from "zustand/react/shallow";
@@ -10,6 +21,8 @@ import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
 import type { ExternalSession, HistoryAgent } from "../types";
 
 interface Props {
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   onSpawn: () => void;
   onOpenSettings: () => void;
   onOpenBoards: () => void;
@@ -18,7 +31,14 @@ interface Props {
   onResume: (h: HistoryAgent) => Promise<void> | void;
 }
 
-export function Sidebar({ onSpawn, onOpenSettings, onOpenBoards, onResume }: Props) {
+export function Sidebar({
+  collapsed,
+  onToggleCollapsed,
+  onSpawn,
+  onOpenSettings,
+  onOpenBoards,
+  onResume,
+}: Props) {
   const agents = useStore(useShallow((s) => Object.values(s.agents)));
   const ptys = useStore(useShallow((s) => Object.values(s.ptys)));
   const activeId = useStore((s) => s.activeTileId);
@@ -56,6 +76,65 @@ export function Sidebar({ onSpawn, onOpenSettings, onOpenBoards, onResume }: Pro
   );
   const totalTurns = agents.reduce((s, a) => s + a.snapshot.usage.turns, 0);
 
+  if (collapsed) {
+    return (
+      <aside className="w-14 shrink-0 border-r border-base-800 bg-base-900/70 flex flex-col items-center py-3 gap-2">
+        <Logo size={34} />
+        <IconButton
+          onClick={onToggleCollapsed}
+          icon={<PanelLeftOpen size={16} />}
+          label="Expand sidebar"
+        />
+        <div className="h-px w-8 bg-base-800 my-1" />
+        <IconButton onClick={onSpawn} icon={<Plus size={16} />} label="Spawn agent" primary />
+        <IconButton onClick={onOpenBoards} icon={<KanbanSquare size={16} />} label="Task boards" />
+        <IconButton onClick={onOpenSettings} icon={<Settings size={16} />} label="Settings" />
+        <div className="h-px w-8 bg-base-800 my-1" />
+        <div className="flex-1 min-h-0 w-full overflow-y-auto px-2 space-y-1">
+          {agents.map((a) => (
+            <button
+              key={a.snapshot.id}
+              onClick={() => setActive(a.snapshot.id)}
+              className={cn(
+                "h-9 w-9 rounded-md border flex items-center justify-center mx-auto transition relative",
+                activeId === a.snapshot.id
+                  ? "bg-(--color-accent-cyan)/10 border-(--color-accent-cyan)/40"
+                  : "border-transparent hover:bg-base-800/60",
+              )}
+              title={`${a.snapshot.spec.name} - ${a.snapshot.spec.role}`}
+            >
+              <Bot size={15} className="text-base-300" />
+              <span
+                className={cn(
+                  "absolute right-1 bottom-1 h-2 w-2 rounded-full ring-2 ring-base-900",
+                  statusColor(a.snapshot.status),
+                )}
+              />
+            </button>
+          ))}
+          {ptys.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => setActive(p.id)}
+              className={cn(
+                "h-9 w-9 rounded-md border flex items-center justify-center mx-auto transition",
+                activeId === p.id
+                  ? "bg-(--color-accent-violet)/10 border-(--color-accent-violet)/40"
+                  : "border-transparent hover:bg-base-800/60",
+              )}
+              title={`${p.title} - ${p.cwd}`}
+            >
+              <Terminal size={15} className="text-(--color-accent-violet)" />
+            </button>
+          ))}
+        </div>
+        <div className="text-[10px] font-mono text-base-500" title="Live agents">
+          {agents.length}
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside className="w-72 shrink-0 border-r border-base-800 bg-base-900/60 flex flex-col">
       {/* Header */}
@@ -67,6 +146,13 @@ export function Sidebar({ onSpawn, onOpenSettings, onOpenBoards, onResume }: Pro
           </div>
           <div className="text-[10px] text-base-500 tracking-widest">MONITOR · v0.1</div>
         </div>
+        <button
+          onClick={onToggleCollapsed}
+          className="text-base-500 hover:text-(--color-accent-cyan) transition"
+          title="Collapse sidebar"
+        >
+          <PanelLeftClose size={16} />
+        </button>
         <button
           onClick={onOpenBoards}
           className="text-base-500 hover:text-(--color-accent-cyan) transition"
@@ -188,6 +274,34 @@ export function Sidebar({ onSpawn, onOpenSettings, onOpenBoards, onResume }: Pro
         </Section>
       </div>
     </aside>
+  );
+}
+
+function IconButton({
+  onClick,
+  icon,
+  label,
+  primary,
+}: {
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={cn(
+        "h-9 w-9 rounded-md border flex items-center justify-center transition",
+        primary
+          ? "bg-(--color-accent-cyan)/12 text-(--color-accent-cyan) border-(--color-accent-cyan)/30 hover:bg-(--color-accent-cyan)/20"
+          : "text-base-500 border-transparent hover:text-base-200 hover:bg-base-800/60",
+      )}
+    >
+      {icon}
+    </button>
   );
 }
 

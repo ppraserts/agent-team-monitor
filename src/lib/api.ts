@@ -120,8 +120,24 @@ export const api = {
     invoke<BoardColumn>("columns_create", {
       boardId, title, color: color ?? null,
     }),
-  columnsUpdate: (id: number, title: string, color?: string | null) =>
-    invoke<BoardColumn>("columns_update", { id, title, color: color ?? null }),
+  columnsUpdate: (
+    id: number,
+    title: string,
+    color?: string | null,
+    description?: string | null,
+    entryCriteria?: string | null,
+    exitCriteria?: string | null,
+    allowedNextColumnIds?: number[],
+  ) =>
+    invoke<BoardColumn>("columns_update", {
+      id,
+      title,
+      color: color ?? null,
+      description: description ?? null,
+      entryCriteria: entryCriteria ?? null,
+      exitCriteria: exitCriteria ?? null,
+      allowedNextColumnIds: allowedNextColumnIds ?? [],
+    }),
   columnsDelete: (id: number) => invoke<void>("columns_delete", { id }),
   columnsReorder: (boardId: number, orderedIds: number[]) =>
     invoke<void>("columns_reorder", { boardId, orderedIds }),

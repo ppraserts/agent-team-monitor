@@ -31,6 +31,10 @@ pub struct BoardColumn {
     pub board_id: i64,
     pub title: String,
     pub color: Option<String>,
+    pub description: Option<String>,
+    pub entry_criteria: Option<String>,
+    pub exit_criteria: Option<String>,
+    pub allowed_next_column_ids: Vec<i64>,
     pub position: i64,
 }
 
@@ -64,6 +68,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             board_id        INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
             title           TEXT NOT NULL,
             color           TEXT,
+            description     TEXT,
+            entry_criteria  TEXT,
+            exit_criteria   TEXT,
+            allowed_next_column_ids_json TEXT NOT NULL DEFAULT '[]',
             position        INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_columns_board ON board_columns(board_id, position);
@@ -82,6 +90,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_cards_col ON board_cards(column_id, position);
         "#,
     )?;
+    let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN description TEXT", []);
+    let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN entry_criteria TEXT", []);
+    let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN exit_criteria TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE board_columns ADD COLUMN allowed_next_column_ids_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
     Ok(())
 }
 
@@ -122,16 +137,78 @@ pub fn create_board(conn: &Connection, name: &str, description: Option<&str>) ->
     let id = conn.last_insert_rowid();
 
     // Auto-seed three sensible default columns so a fresh board isn't empty.
-    let cols = [("Backlog", "#5ed3ff"), ("Doing", "#dab2ff"), ("Done", "#9ef0a3")];
-    for (i, (title, color)) in cols.iter().enumerate() {
+    let cols = [
+        DefaultColumnRule {
+            title: "Backlog",
+            color: "#5ed3ff",
+            description: "New work starts here. Clarify the goal, expected outcome, assignees, and any constraints before moving forward.",
+            entry_criteria: "A card can enter Backlog when it has a clear title and enough context for triage.",
+            exit_criteria: "Before leaving Backlog, the card should have a useful description, at least one assignee when execution is needed, and a clear next step.",
+            allowed_next_positions: &[1],
+        },
+        DefaultColumnRule {
+            title: "Doing",
+            color: "#dab2ff",
+            description: "Active execution lane. Assigned agents should work on the card, report progress, call out blockers, and suggest the next lane when ready.",
+            entry_criteria: "A card should enter Doing only when the task is understood and an assignee is available.",
+            exit_criteria: "Before leaving Doing, the agent should summarize what changed, list open issues, and say whether the work is complete or blocked.",
+            allowed_next_positions: &[0, 2],
+        },
+        DefaultColumnRule {
+            title: "Done",
+            color: "#9ef0a3",
+            description: "Completed work. Cards in this lane should need no further action except archival or later follow-up.",
+            entry_criteria: "A card can enter Done when the stated outcome is met and any relevant notes, files, or decisions are recorded on the card or chat.",
+            exit_criteria: "Done cards normally stay here. Move back only if follow-up work is discovered.",
+            allowed_next_positions: &[1],
+        },
+    ];
+    let mut inserted_ids = Vec::new();
+    for (i, col) in cols.iter().enumerate() {
         conn.execute(
-            "INSERT INTO board_columns (board_id, title, color, position) VALUES (?1, ?2, ?3, ?4)",
-            params![id, title, color, i as i64],
+            "INSERT INTO board_columns (
+                board_id, title, color, description, entry_criteria, exit_criteria,
+                allowed_next_column_ids_json, position
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                col.title,
+                col.color,
+                col.description,
+                col.entry_criteria,
+                col.exit_criteria,
+                "[]",
+                i as i64,
+            ],
+        )?;
+        inserted_ids.push(conn.last_insert_rowid());
+    }
+
+    for (i, col) in cols.iter().enumerate() {
+        let allowed_ids: Vec<i64> = col
+            .allowed_next_positions
+            .iter()
+            .filter_map(|pos| inserted_ids.get(*pos).copied())
+            .collect();
+        let allowed_json = serde_json::to_string(&allowed_ids)?;
+        conn.execute(
+            "UPDATE board_columns SET allowed_next_column_ids_json = ?2 WHERE id = ?1",
+            params![inserted_ids[i], allowed_json],
         )?;
     }
 
     get_board(conn, id)
 }
+
+struct DefaultColumnRule {
+    title: &'static str,
+    color: &'static str,
+    description: &'static str,
+    entry_criteria: &'static str,
+    exit_criteria: &'static str,
+    allowed_next_positions: &'static [usize],
+}
+
 
 pub fn get_board(conn: &Connection, id: i64) -> Result<Board> {
     let board = conn.query_row(
@@ -173,18 +250,11 @@ pub fn delete_board(conn: &Connection, id: i64) -> Result<()> {
 
 pub fn list_columns(conn: &Connection, board_id: i64) -> Result<Vec<BoardColumn>> {
     let mut stmt = conn.prepare(
-        "SELECT id, board_id, title, color, position FROM board_columns \
+        "SELECT id, board_id, title, color, description, entry_criteria, exit_criteria, \
+                allowed_next_column_ids_json, position FROM board_columns \
          WHERE board_id = ?1 ORDER BY position ASC, id ASC",
     )?;
-    let rows = stmt.query_map(params![board_id], |r| {
-        Ok(BoardColumn {
-            id: r.get(0)?,
-            board_id: r.get(1)?,
-            title: r.get(2)?,
-            color: r.get(3)?,
-            position: r.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![board_id], parse_column_row)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -215,18 +285,28 @@ pub fn create_column(
 
 pub fn get_column(conn: &Connection, id: i64) -> Result<BoardColumn> {
     Ok(conn.query_row(
-        "SELECT id, board_id, title, color, position FROM board_columns WHERE id = ?1",
+        "SELECT id, board_id, title, color, description, entry_criteria, exit_criteria, \
+                allowed_next_column_ids_json, position FROM board_columns WHERE id = ?1",
         params![id],
-        |r| {
-            Ok(BoardColumn {
-                id: r.get(0)?,
-                board_id: r.get(1)?,
-                title: r.get(2)?,
-                color: r.get(3)?,
-                position: r.get(4)?,
-            })
-        },
+        parse_column_row,
     )?)
+}
+
+fn parse_column_row(r: &rusqlite::Row) -> Result<BoardColumn, rusqlite::Error> {
+    let allowed_json: String = r.get(7)?;
+    let allowed_next_column_ids: Vec<i64> =
+        serde_json::from_str(&allowed_json).unwrap_or_default();
+    Ok(BoardColumn {
+        id: r.get(0)?,
+        board_id: r.get(1)?,
+        title: r.get(2)?,
+        color: r.get(3)?,
+        description: r.get(4)?,
+        entry_criteria: r.get(5)?,
+        exit_criteria: r.get(6)?,
+        allowed_next_column_ids,
+        position: r.get(8)?,
+    })
 }
 
 pub fn update_column(
@@ -234,10 +314,17 @@ pub fn update_column(
     id: i64,
     title: &str,
     color: Option<&str>,
+    description: Option<&str>,
+    entry_criteria: Option<&str>,
+    exit_criteria: Option<&str>,
+    allowed_next_column_ids: &[i64],
 ) -> Result<BoardColumn> {
+    let allowed_json = serde_json::to_string(allowed_next_column_ids)?;
     conn.execute(
-        "UPDATE board_columns SET title = ?2, color = ?3 WHERE id = ?1",
-        params![id, title, color],
+        "UPDATE board_columns SET title = ?2, color = ?3, description = ?4, \
+         entry_criteria = ?5, exit_criteria = ?6, allowed_next_column_ids_json = ?7 \
+         WHERE id = ?1",
+        params![id, title, color, description, entry_criteria, exit_criteria, allowed_json],
     )?;
     get_column(conn, id)
 }

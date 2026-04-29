@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { LayoutGrid, Network, Eye, Zap } from "lucide-react";
+import {
+  LayoutGrid,
+  Network,
+  Eye,
+  Zap,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+} from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
@@ -28,6 +36,8 @@ export default function App() {
   /// boards panel. Mid by default; user drags the divider to resize.
   const [boardSplit, setBoardSplit] = useState(0.42);
   const [rightPane, setRightPane] = useState<RightPaneMode>("feed");
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
 
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const startResize = useCallback((e: React.MouseEvent) => {
@@ -204,6 +214,8 @@ export default function App() {
   return (
     <div className="h-screen w-screen flex bg-base-950 text-base-200 grid-bg">
       <Sidebar
+        collapsed={leftCollapsed}
+        onToggleCollapsed={() => setLeftCollapsed((v) => !v)}
         onSpawn={() => setSpawnOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenBoards={() => setBoardsOpen((v) => !v)}
@@ -213,6 +225,14 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0">
         <div className="h-11 border-b border-base-800 px-3 flex items-center gap-3 bg-base-900/40 backdrop-blur">
           <div className="flex items-center gap-1 text-xs text-base-500">
+            {leftCollapsed && (
+              <ToolbarBtn
+                active={false}
+                onClick={() => setLeftCollapsed(false)}
+                icon={<PanelLeftOpen size={13} />}
+                label="Menu"
+              />
+            )}
             <LayoutGrid size={12} />
             <span>{tiles.length} pane{tiles.length === 1 ? "" : "s"}</span>
           </div>
@@ -235,6 +255,13 @@ export default function App() {
               icon={<Zap size={13} />}
               label="Usage"
             />
+            {rightPane !== "off" && (
+              <ToolbarIconBtn
+                onClick={() => setRightCollapsed((v) => !v)}
+                icon={rightCollapsed ? <PanelRightOpen size={14} /> : <PanelRightClose size={14} />}
+                label={rightCollapsed ? "Expand right sidebar" : "Collapse right sidebar"}
+              />
+            )}
           </div>
         </div>
 
@@ -294,7 +321,18 @@ export default function App() {
             )}
           </div>
 
-          {rightPane !== "off" && (
+          {rightPane !== "off" && rightCollapsed && (
+            <RightRail
+              mode={rightPane}
+              onMode={(mode) => {
+                setRightPane(mode);
+                setRightCollapsed(false);
+              }}
+              onExpand={() => setRightCollapsed(false)}
+            />
+          )}
+
+          {rightPane !== "off" && !rightCollapsed && (
             <div className="w-96 shrink-0 border-l border-base-800 p-3 bg-base-950/40">
               {rightPane === "feed" && <TeamFeed />}
               {rightPane === "graph" && <AgentGraph mentionPulse={mentionPulse} />}
@@ -326,6 +364,95 @@ function ToolbarBtn({
       )}
     >
       {icon} {label}
+    </button>
+  );
+}
+
+function ToolbarIconBtn({
+  onClick,
+  icon,
+  label,
+}: {
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="h-7 w-7 rounded-md border border-transparent text-base-400 hover:text-base-200 hover:bg-base-800/50 flex items-center justify-center transition"
+      title={label}
+      aria-label={label}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function RightRail({
+  mode,
+  onMode,
+  onExpand,
+}: {
+  mode: Exclude<RightPaneMode, "off">;
+  onMode: (mode: Exclude<RightPaneMode, "off">) => void;
+  onExpand: () => void;
+}) {
+  return (
+    <div className="w-12 shrink-0 border-l border-base-800 bg-base-950/60 flex flex-col items-center py-3 gap-2">
+      <RailButton
+        active={false}
+        onClick={onExpand}
+        icon={<PanelRightOpen size={16} />}
+        label="Expand right sidebar"
+      />
+      <div className="h-px w-7 bg-base-800 my-1" />
+      <RailButton
+        active={mode === "feed"}
+        onClick={() => onMode("feed")}
+        icon={<Eye size={15} />}
+        label="Activity"
+      />
+      <RailButton
+        active={mode === "graph"}
+        onClick={() => onMode("graph")}
+        icon={<Network size={15} />}
+        label="Graph"
+      />
+      <RailButton
+        active={mode === "usage"}
+        onClick={() => onMode("usage")}
+        icon={<Zap size={15} />}
+        label="Usage"
+      />
+    </div>
+  );
+}
+
+function RailButton({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={cn(
+        "h-8 w-8 rounded-md border flex items-center justify-center transition",
+        active
+          ? "bg-(--color-accent-cyan)/15 text-(--color-accent-cyan) border-(--color-accent-cyan)/35"
+          : "text-base-500 border-transparent hover:text-base-200 hover:bg-base-800/60",
+      )}
+    >
+      {icon}
     </button>
   );
 }

@@ -48,6 +48,7 @@ export function BoardsPanel({ onClose }: Props) {
   const [columns, setColumns] = useState<BoardColumn[]>([]);
   const [cards, setCards] = useState<BoardCard[]>([]);
   const [editingCard, setEditingCard] = useState<BoardCard | null>(null);
+  const [editingColumnRules, setEditingColumnRules] = useState<BoardColumn | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -161,7 +162,15 @@ export function BoardsPanel({ onClose }: Props) {
       return;
     }
     try {
-      await api.columnsUpdate(c.id, title.trim(), c.color);
+      await api.columnsUpdate(
+        c.id,
+        title.trim(),
+        c.color,
+        c.description,
+        c.entry_criteria,
+        c.exit_criteria,
+        c.allowed_next_column_ids,
+      );
       await refreshBoard(activeBoardId!);
       setRenamingColumnId(null);
     } catch (e: any) { setError(String(e?.message ?? e)); }
@@ -172,6 +181,23 @@ export function BoardsPanel({ onClose }: Props) {
       await api.columnsDelete(c.id);
       await refreshBoard(activeBoardId!);
       showToast(`Deleted column "${c.title}"`);
+    } catch (e: any) { setError(String(e?.message ?? e)); }
+  };
+
+  const onSaveColumnRules = async (c: BoardColumn) => {
+    try {
+      const saved = await api.columnsUpdate(
+        c.id,
+        c.title,
+        c.color,
+        c.description,
+        c.entry_criteria,
+        c.exit_criteria,
+        c.allowed_next_column_ids,
+      );
+      setColumns((cols) => cols.map((x) => (x.id === saved.id ? saved : x)));
+      setEditingColumnRules(null);
+      showToast(`Updated workflow rules for "${saved.title}"`);
     } catch (e: any) { setError(String(e?.message ?? e)); }
   };
 
@@ -220,7 +246,7 @@ export function BoardsPanel({ onClose }: Props) {
       showToast("Pick at least one assignee first.");
       return;
     }
-    const text = `[BOARD TASK] ${card.title}\n\n${card.description ?? ""}`.trim();
+    const text = buildBoardTaskMessage(card, columns);
     const liveAgents = useStore.getState().agents;
     const linkedAgentIds: string[] = [];
     let sent = 0;
@@ -247,6 +273,11 @@ export function BoardsPanel({ onClose }: Props) {
           ? columns[currentIdx + 1]
           : null;
       if (nextCol) {
+        const block = transitionBlockReason(card.column_id, nextCol.id, columns);
+        if (block) {
+          showToast(block);
+          return;
+        }
         try {
           await api.cardsMove(card.id, nextCol.id, 0);
           await refreshBoard(activeBoardId!);
@@ -283,6 +314,11 @@ export function BoardsPanel({ onClose }: Props) {
       return;
     }
     try {
+      const block = transitionBlockReason(card.column_id, lastCol.id, columns);
+      if (block) {
+        showToast(block);
+        return;
+      }
       await api.cardsMove(card.id, lastCol.id, 0);
       useStore.getState().unlinkCard(card.id);
       setEditingCard(null);
@@ -320,6 +356,7 @@ export function BoardsPanel({ onClose }: Props) {
       if (overCard) destColId = overCard.column_id;
     }
     if (destColId == null || destColId === activeCard.column_id) return;
+    if (transitionBlockReason(activeCard.column_id, destColId, columns)) return;
 
     // Optimistically move into the new column at end (visual only — final
     // position settled in onDragEnd).
@@ -378,6 +415,12 @@ export function BoardsPanel({ onClose }: Props) {
       }
 
       try {
+        const block = transitionBlockReason(card.column_id, destColId, columns);
+        if (block) {
+          showToast(block);
+          await refreshBoard(activeBoardId!);
+          return;
+        }
         await api.cardsMove(cardId, destColId, destIndex);
         await refreshBoard(activeBoardId!);
       } catch (e: any) { setError(String(e?.message ?? e)); }
@@ -533,6 +576,7 @@ export function BoardsPanel({ onClose }: Props) {
                     </button>
                   )}
                 </div>
+                <BoardMonitor columns={columns} cards={cards} />
 
                 <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden p-3">
                   <DndContext
@@ -560,6 +604,7 @@ export function BoardsPanel({ onClose }: Props) {
                             onStartRename={() => setRenamingColumnId(col.id)}
                             onSubmitRename={(t) => onRenameColumn(col, t)}
                             onCancelRename={() => setRenamingColumnId(null)}
+                            onEditRules={() => setEditingColumnRules(col)}
                             onDeleteColumn={() => onDeleteColumn(col)}
                             onClickCard={(c) => setEditingCard(c)}
                             agentCardLink={agentCardLink}
@@ -607,6 +652,14 @@ export function BoardsPanel({ onClose }: Props) {
         onMarkDone={() => onMarkDone(editingCard)}
       />
     )}
+    {editingColumnRules && (
+      <ColumnRulesEditor
+        column={editingColumnRules}
+        columns={columns}
+        onClose={() => setEditingColumnRules(null)}
+        onSave={onSaveColumnRules}
+      />
+    )}
     </>
   );
 }
@@ -618,7 +671,7 @@ function ColumnView({
   isCreatingCard, isRenaming,
   onStartAddCard, onSubmitAddCard, onCancelAddCard,
   onStartRename, onSubmitRename, onCancelRename,
-  onDeleteColumn, onClickCard,
+  onEditRules, onDeleteColumn, onClickCard,
   agentCardLink, agentsByName,
 }: {
   column: BoardColumn;
@@ -631,6 +684,7 @@ function ColumnView({
   onStartRename: () => void;
   onSubmitRename: (title: string) => void;
   onCancelRename: () => void;
+  onEditRules: () => void;
   onDeleteColumn: () => void;
   onClickCard: (c: BoardCard) => void;
   agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
@@ -705,6 +759,12 @@ function ColumnView({
                   className="w-full text-left px-2 py-1 text-xs hover:bg-base-800/60 flex items-center gap-1.5"
                 >
                   <Pencil size={11} /> Rename
+                </button>
+                <button
+                  onClick={() => { setMenuOpen(false); onEditRules(); }}
+                  className="w-full text-left px-2 py-1 text-xs hover:bg-base-800/60 flex items-center gap-1.5"
+                >
+                  <MoreHorizontal size={11} /> Workflow rules
                 </button>
                 <ConfirmMenuItem
                   label="Delete column"
@@ -1022,6 +1082,184 @@ function CardEditor({
       </div>
     </div>
   );
+}
+
+function BoardMonitor({
+  columns, cards,
+}: {
+  columns: BoardColumn[];
+  cards: BoardCard[];
+}) {
+  if (columns.length === 0) return null;
+  const blockedTransitions = columns.filter((c) => c.allowed_next_column_ids.length > 0).length;
+  const unassigned = cards.filter((c) => c.assignees.length === 0).length;
+  const withRules = columns.filter(
+    (c) => nonEmpty(c.description) || nonEmpty(c.entry_criteria) || nonEmpty(c.exit_criteria),
+  ).length;
+  const lastCol = columns[columns.length - 1];
+  const done = cards.filter((c) => c.column_id === lastCol.id).length;
+  return (
+    <div className="px-4 py-2 border-b border-base-800 bg-base-950/30 grid grid-cols-4 gap-2 text-[11px]">
+      <MonitorStat label="Cards" value={String(cards.length)} />
+      <MonitorStat label="Done" value={`${done}/${cards.length || 0}`} />
+      <MonitorStat label="Unassigned" value={String(unassigned)} warn={unassigned > 0} />
+      <MonitorStat label="Ruled lanes" value={`${withRules}/${columns.length} (${blockedTransitions} gated)`} />
+    </div>
+  );
+}
+
+function MonitorStat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className="rounded border border-base-800 bg-base-900/40 px-2 py-1">
+      <div className="text-[9px] uppercase tracking-wider text-base-500">{label}</div>
+      <div className={cn("font-mono", warn ? "text-(--color-accent-amber)" : "text-base-300")}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] tracking-wider text-base-500 mb-1 uppercase">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function ColumnRulesEditor({
+  column, columns, onClose, onSave,
+}: {
+  column: BoardColumn;
+  columns: BoardColumn[];
+  onClose: () => void;
+  onSave: (column: BoardColumn) => void;
+}) {
+  const [draft, setDraft] = useState<BoardColumn>(column);
+  useEffect(() => setDraft(column), [column.id]);
+
+  const toggleNext = (id: number) => {
+    setDraft((d) => ({
+      ...d,
+      allowed_next_column_ids: d.allowed_next_column_ids.includes(id)
+        ? d.allowed_next_column_ids.filter((x) => x !== id)
+        : [...d.allowed_next_column_ids, id],
+    }));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-base-950/80 backdrop-blur-sm">
+      <div className="glass rounded-xl w-[620px] max-w-[92vw] max-h-[88vh] overflow-hidden flex flex-col">
+        <div className="px-4 py-3 border-b border-base-800 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold">Workflow rules</div>
+            <div className="text-[11px] text-base-500">{column.title}</div>
+          </div>
+          <button onClick={onClose} className="text-base-500 hover:text-base-200">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="p-4 space-y-3 overflow-y-auto">
+          <WorkflowField label="Lane purpose / agent instructions">
+            <textarea
+              value={draft.description ?? ""}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+              rows={3}
+              className="w-full bg-base-950 border border-base-700 rounded-md p-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
+              placeholder="What should happen while a card is in this lane?"
+            />
+          </WorkflowField>
+          <WorkflowField label="Entry criteria">
+            <textarea
+              value={draft.entry_criteria ?? ""}
+              onChange={(e) => setDraft({ ...draft, entry_criteria: e.target.value })}
+              rows={3}
+              className="w-full bg-base-950 border border-base-700 rounded-md p-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
+              placeholder="What must be true before a card enters this lane?"
+            />
+          </WorkflowField>
+          <WorkflowField label="Exit criteria">
+            <textarea
+              value={draft.exit_criteria ?? ""}
+              onChange={(e) => setDraft({ ...draft, exit_criteria: e.target.value })}
+              rows={3}
+              className="w-full bg-base-950 border border-base-700 rounded-md p-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
+              placeholder="What must be done before leaving this lane?"
+            />
+          </WorkflowField>
+          <WorkflowField label="Allowed next lanes (empty = any lane)">
+            <div className="flex flex-wrap gap-1.5">
+              {columns.filter((c) => c.id !== column.id).map((c) => {
+                const on = draft.allowed_next_column_ids.includes(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => toggleNext(c.id)}
+                    className={cn(
+                      "px-2 py-1 text-[11px] rounded-md border transition",
+                      on
+                        ? "bg-(--color-accent-cyan)/20 border-(--color-accent-cyan)/40 text-(--color-accent-cyan)"
+                        : "bg-base-800/50 border-base-700/50 text-base-300 hover:bg-base-700/60",
+                    )}
+                  >
+                    {c.title}
+                  </button>
+                );
+              })}
+            </div>
+          </WorkflowField>
+        </div>
+        <div className="px-4 py-3 border-t border-base-800 flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs rounded text-base-400 hover:bg-base-800/60">
+            Cancel
+          </button>
+          <button
+            onClick={() => onSave(draft)}
+            className="px-3 py-1.5 text-xs rounded bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan)"
+          >
+            Save rules
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function transitionBlockReason(fromId: number, toId: number, columns: BoardColumn[]): string | null {
+  if (fromId === toId) return null;
+  const from = columns.find((c) => c.id === fromId);
+  const to = columns.find((c) => c.id === toId);
+  if (!from || !to) return null;
+  if (from.allowed_next_column_ids.length === 0) return null;
+  if (from.allowed_next_column_ids.includes(toId)) return null;
+  return `Blocked by workflow: "${from.title}" can only move to ${from.allowed_next_column_ids
+    .map((id) => columns.find((c) => c.id === id)?.title)
+    .filter(Boolean)
+    .join(", ")}.`;
+}
+
+function buildBoardTaskMessage(card: BoardCard, columns: BoardColumn[]): string {
+  const current = columns.find((c) => c.id === card.column_id);
+  const next = current?.allowed_next_column_ids
+    .map((id) => columns.find((c) => c.id === id)?.title)
+    .filter(Boolean)
+    .join(", ");
+  const workflow = current
+    ? [
+        `[CURRENT LANE] ${current.title}`,
+        nonEmpty(current.description) ? `[LANE INSTRUCTIONS]\n${current.description}` : "",
+        nonEmpty(current.entry_criteria) ? `[ENTRY CRITERIA]\n${current.entry_criteria}` : "",
+        nonEmpty(current.exit_criteria) ? `[EXIT CRITERIA]\n${current.exit_criteria}` : "",
+        next ? `[ALLOWED NEXT LANES] ${next}` : "[ALLOWED NEXT LANES] any lane",
+        "When you finish, report which lane this card should move to and why. Do not assume it moved automatically.",
+      ].filter(Boolean).join("\n\n")
+    : "";
+  return `[BOARD TASK] ${card.title}\n\n${card.description ?? ""}\n\n${workflow}`.trim();
+}
+
+function nonEmpty(value: string | null | undefined): value is string {
+  return !!value && value.trim().length > 0;
 }
 
 // ===== Inline UI helpers =====
