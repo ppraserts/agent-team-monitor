@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use crate::boards::BoardCard;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -113,6 +114,14 @@ pub enum AgentEvent {
         from_agent_id: String,
         to_agent_name: String,
         reason: String,
+    },
+    BoardAction {
+        agent_id: String,
+        action: String,
+        ok: bool,
+        message: String,
+        card: Option<BoardCard>,
+        ts: DateTime<Utc>,
     },
     Exit { agent_id: String, code: Option<i32> },
     Stderr { agent_id: String, line: String },

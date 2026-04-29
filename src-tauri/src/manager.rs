@@ -19,6 +19,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
@@ -26,6 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::adapter::{make_adapter, AgentAdapter, ParsedEvent};
 use crate::agent::{AgentEvent, AgentSnapshot, AgentSpec, AgentStatus, AgentUsage, ResumeOptions};
+use crate::boards::{self, BoardCard, CardInput};
 use crate::db::Db;
 
 const EVENT_CHANNEL: &str = "agent://event";
@@ -223,6 +225,55 @@ impl AgentManager {
         }
     }
 
+    fn current_board_context(&self) -> String {
+        let Ok(lines) = self.db.with_conn(|conn| {
+            let board_list = boards::list_boards(conn)?;
+            let mut out = Vec::new();
+            for board in board_list.iter().take(3) {
+                let cols = boards::list_columns(conn, board.id)?;
+                let col_lines = cols
+                    .iter()
+                    .map(|c| {
+                        let next = if c.allowed_next_column_ids.is_empty() {
+                            "any".to_string()
+                        } else {
+                            c.allowed_next_column_ids
+                                .iter()
+                                .filter_map(|id| cols.iter().find(|x| x.id == *id))
+                                .map(|x| format!("{}#{}", x.title, x.id))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        format!(
+                            "{}#{} next=[{}] purpose={}",
+                            c.title,
+                            c.id,
+                            next,
+                            c.description.as_deref().unwrap_or("-"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                out.push(format!("board {}#{}: {}", board.name, board.id, col_lines));
+            }
+            Ok(out)
+        }) else {
+            return String::new();
+        };
+
+        if lines.is_empty() {
+            return String::new();
+        }
+
+        format!(
+            "[BOARD CONTEXT NOW]\n{}\n\
+             To create a task card, include exactly one JSON object in this format:\n\
+             <BOARD_ACTION>{{\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}}</BOARD_ACTION>\n\
+             Use existing board_id/column_id when possible. The app validates and creates the card; do not claim it was created unless the app confirms it.",
+            lines.join("\n")
+        )
+    }
+
     pub async fn send(&self, agent_id: &str, message: String) -> Result<()> {
         self.send_internal(agent_id, message, None, None).await
     }
@@ -252,10 +303,18 @@ impl AgentManager {
         // knows who's on the team RIGHT NOW (covers teammates spawned after
         // this one — the system_prompt only had a snapshot at spawn time).
         let roster_header = self.current_roster_line(agent_id);
-        let stdin_full = if roster_header.is_empty() {
+        let board_context = self.current_board_context();
+        let mut silent_headers = Vec::new();
+        if !roster_header.is_empty() {
+            silent_headers.push(roster_header);
+        }
+        if !board_context.is_empty() {
+            silent_headers.push(board_context);
+        }
+        let stdin_full = if silent_headers.is_empty() {
             stdin_message.clone()
         } else {
-            format!("{}\n\n{}", roster_header, stdin_message)
+            format!("{}\n\n{}", silent_headers.join("\n\n"), stdin_message)
         };
 
         let line = (handle.encode_user)(&stdin_full);
@@ -436,18 +495,21 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
             mgr.set_status(agent_id, AgentStatus::Working);
             let ts = Utc::now();
             detect_and_route_mentions(mgr, agent_id, &text).await;
-
-            let msg_id = uuid::Uuid::new_v4().to_string();
-            if let Err(e) = mgr.db.save_message(&msg_id, agent_id, "assistant", &text, None, ts) {
-                tracing::warn!("db save_message(assistant) failed: {}", e);
+            detect_and_apply_board_actions(mgr, agent_id, &text).await;
+            let display_text = strip_tagged_blocks(&text, "BOARD_ACTION").trim().to_string();
+            if !display_text.is_empty() {
+                let msg_id = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = mgr.db.save_message(&msg_id, agent_id, "assistant", &display_text, None, ts) {
+                    tracing::warn!("db save_message(assistant) failed: {}", e);
+                }
+                mgr.emit(AgentEvent::Message {
+                    agent_id: agent_id.to_string(),
+                    role: "assistant".into(),
+                    content: display_text,
+                    ts,
+                    from_agent_id: None,
+                });
             }
-            mgr.emit(AgentEvent::Message {
-                agent_id: agent_id.to_string(),
-                role: "assistant".into(),
-                content: text,
-                ts,
-                from_agent_id: None,
-            });
         }
         ParsedEvent::ToolUse { tool, input } => {
             mgr.set_status(agent_id, AgentStatus::Working);
@@ -529,15 +591,184 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
         )
     };
 
+    let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, or subtasks, you may propose that the app creates a board card. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported now: {\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}. Use board/column ids from BOARD CONTEXT. Keep card titles short and actionable.\n";
+
     let new_prompt = match &spec.system_prompt {
-        Some(p) if !p.trim().is_empty() => Some(format!("{}{}", p.trim_end(), roster_line)),
-        _ => Some(roster_line.trim_start().to_string()),
+        Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}", p.trim_end(), roster_line, board_protocol)),
+        _ => Some(format!("{}{}", roster_line.trim_start(), board_protocol)),
     };
 
     AgentSpec {
         system_prompt: new_prompt,
         ..spec.clone()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct BoardActionRequest {
+    action: String,
+    #[serde(default)]
+    board_id: Option<i64>,
+    #[serde(default)]
+    board_name: Option<String>,
+    #[serde(default)]
+    column_id: Option<i64>,
+    #[serde(default)]
+    lane: Option<String>,
+    #[serde(default)]
+    column: Option<String>,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    assignees: Vec<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+}
+
+async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text: &str) {
+    for raw in extract_tagged_blocks(text, "BOARD_ACTION").into_iter().take(5) {
+        let ts = Utc::now();
+        let parsed = serde_json::from_str::<BoardActionRequest>(&raw);
+        let result = match parsed {
+            Ok(req) => apply_board_action(mgr, &req),
+            Err(e) => Err(anyhow!("invalid BOARD_ACTION json: {}", e)),
+        };
+
+        match result {
+            Ok(card) => {
+                let msg = format!("created card #{}: {}", card.id, card.title);
+                let _ = mgr.db.save_tool_use(
+                    &uuid::Uuid::new_v4().to_string(),
+                    agent_id,
+                    "board.create_card",
+                    &serde_json::json!({
+                        "card_id": card.id,
+                        "column_id": card.column_id,
+                        "title": card.title,
+                    }),
+                    ts,
+                );
+                mgr.emit(AgentEvent::BoardAction {
+                    agent_id: agent_id.to_string(),
+                    action: "create_card".to_string(),
+                    ok: true,
+                    message: msg,
+                    card: Some(card),
+                    ts,
+                });
+            }
+            Err(e) => {
+                mgr.emit(AgentEvent::BoardAction {
+                    agent_id: agent_id.to_string(),
+                    action: "create_card".to_string(),
+                    ok: false,
+                    message: e.to_string(),
+                    card: None,
+                    ts,
+                });
+            }
+        }
+    }
+}
+
+fn apply_board_action(mgr: &AgentManager, req: &BoardActionRequest) -> Result<BoardCard> {
+    if req.action != "create_card" {
+        return Err(anyhow!("unsupported board action '{}'", req.action));
+    }
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err(anyhow!("card title is required"));
+    }
+    if title.chars().count() > 160 {
+        return Err(anyhow!("card title is too long"));
+    }
+
+    mgr.db.with_conn(|conn| {
+        let board_id = match req.board_id {
+            Some(id) => id,
+            None => {
+                let board_list = boards::list_boards(conn)?;
+                if let Some(name) = req.board_name.as_deref() {
+                    board_list
+                        .iter()
+                        .find(|b| b.name.eq_ignore_ascii_case(name))
+                        .map(|b| b.id)
+                        .ok_or_else(|| anyhow!("board '{}' not found", name))?
+                } else {
+                    board_list
+                        .first()
+                        .map(|b| b.id)
+                        .ok_or_else(|| anyhow!("no boards exist yet"))?
+                }
+            }
+        };
+
+        let column_id = match req.column_id {
+            Some(id) => {
+                let col = boards::get_column(conn, id)?;
+                if col.board_id != board_id {
+                    return Err(anyhow!("column #{} is not on board #{}", id, board_id));
+                }
+                id
+            }
+            None => {
+                let lane = req
+                    .lane
+                    .as_deref()
+                    .or(req.column.as_deref())
+                    .unwrap_or("Backlog");
+                boards::find_column_by_title(conn, board_id, lane)?
+                    .ok_or_else(|| anyhow!("lane '{}' not found on board #{}", lane, board_id))?
+                    .id
+            }
+        };
+
+        let input = CardInput {
+            title: title.to_string(),
+            description: req.description.clone(),
+            assignees: req.assignees.clone(),
+            labels: req.labels.clone(),
+        };
+        boards::create_card(conn, column_id, &input)
+    })
+}
+
+fn extract_tagged_blocks(text: &str, tag: &str) -> Vec<String> {
+    let start_tag = format!("<{}>", tag);
+    let end_tag = format!("</{}>", tag);
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&start_tag) {
+        let after_start = &rest[start + start_tag.len()..];
+        let Some(end) = after_start.find(&end_tag) else {
+            break;
+        };
+        let body = after_start[..end].trim();
+        if !body.is_empty() {
+            out.push(body.to_string());
+        }
+        rest = &after_start[end + end_tag.len()..];
+    }
+    out
+}
+
+fn strip_tagged_blocks(text: &str, tag: &str) -> String {
+    let start_tag = format!("<{}>", tag);
+    let end_tag = format!("</{}>", tag);
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&start_tag) {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + start_tag.len()..];
+        let Some(end) = after_start.find(&end_tag) else {
+            rest = "";
+            break;
+        };
+        rest = &after_start[end + end_tag.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Look for `@AgentName` mentions in assistant text and route them to the

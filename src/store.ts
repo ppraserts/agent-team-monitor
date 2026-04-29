@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   PtySnapshot,
   VendorInfo,
+  BoardCard,
 } from "./types";
 
 interface AgentRecord {
@@ -32,6 +33,16 @@ interface State {
   /// the rightmost (done) column, the card is deleted, or the agent exits.
   /// In-memory only.
   agentCardLink: Record<string, { cardId: number; cardTitle: string; boardId: number }>;
+  boardRevision: number;
+  boardActivities: {
+    id: string;
+    agentId: string;
+    action: string;
+    ok: boolean;
+    message: string;
+    card: BoardCard | null;
+    ts: string;
+  }[];
 
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
@@ -60,6 +71,14 @@ interface State {
   ) => void;
   unlinkAgent: (agentId: string) => void;
   unlinkCard: (cardId: number) => void;
+  appendBoardActivity: (
+    agentId: string,
+    action: string,
+    ok: boolean,
+    message: string,
+    card: BoardCard | null,
+    ts: string,
+  ) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -71,6 +90,8 @@ export const useStore = create<State>((set) => ({
   layout: [],
   proposalDecisions: {},
   agentCardLink: {},
+  boardRevision: 0,
+  boardActivities: [],
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
@@ -212,4 +233,13 @@ export const useStore = create<State>((set) => ({
       }
       return { agentCardLink: next };
     }),
+
+  appendBoardActivity: (agentId, action, ok, message, card, ts) =>
+    set((s) => ({
+      boardRevision: s.boardRevision + 1,
+      boardActivities: [
+        { id: crypto.randomUUID(), agentId, action, ok, message, card, ts },
+        ...s.boardActivities,
+      ].slice(0, 100),
+    })),
 }));

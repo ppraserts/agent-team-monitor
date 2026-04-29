@@ -75,6 +75,7 @@ export default function App() {
   const setVendors = useStore((s) => s.setVendors);
   const removeAgent = useStore((s) => s.removeAgent);
   const removePty = useStore((s) => s.removePty);
+  const appendBoardActivity = useStore((s) => s.appendBoardActivity);
   const layout = useStore((s) => s.layout);
   const agents = useStore((s) => s.agents);
   const ptys = useStore((s) => s.ptys);
@@ -168,6 +169,19 @@ export default function App() {
             `[mention blocked] ${ev.from_agent_id} → @${ev.to_agent_name}: ${ev.reason}`,
           );
           break;
+        case "board_action":
+          appendBoardActivity(
+            ev.agent_id,
+            ev.action,
+            ev.ok,
+            ev.message,
+            ev.card,
+            ev.ts,
+          );
+          if (ev.ok && ev.card) {
+            appendToolUse(ev.agent_id, `board.${ev.action}`, ev.card, ev.ts);
+          }
+          break;
         case "exit":
           // Drop any board-card linkage so the card stops showing
           // "working" once the underlying process is gone.
@@ -189,7 +203,15 @@ export default function App() {
       unlistenRef.current = null;
       u?.();
     };
-  }, [upsertAgent, setStatus, appendMessage, appendToolUse, applyUsage, removeAgent]);
+  }, [
+    upsertAgent,
+    setStatus,
+    appendMessage,
+    appendToolUse,
+    applyUsage,
+    removeAgent,
+    appendBoardActivity,
+  ]);
 
   useEffect(() => {
     let cancelled = false;

@@ -80,6 +80,15 @@ export type AgentEvent =
       to_agent_name: string;
       reason: string;
     }
+  | {
+      kind: "board_action";
+      agent_id: string;
+      action: string;
+      ok: boolean;
+      message: string;
+      card: BoardCard | null;
+      ts: string;
+    }
   | { kind: "exit"; agent_id: string; code: number | null }
   | { kind: "stderr"; agent_id: string; line: string };
 

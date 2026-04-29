@@ -70,6 +70,7 @@ export function BoardsPanel({ onClose }: Props) {
   );
   /// agent_id → { cardId, cardTitle, boardId } — populated by Send.
   const agentCardLink = useStore((s) => s.agentCardLink);
+  const boardRevision = useStore((s) => s.boardRevision);
   /// name → snapshot lookup so cards can show whether their assignees are
   /// currently busy / idle / not spawned.
   const agentsByName = useStore(
@@ -109,6 +110,10 @@ export function BoardsPanel({ onClose }: Props) {
   useEffect(() => {
     if (activeBoardId != null) refreshBoard(activeBoardId);
   }, [activeBoardId]);
+
+  useEffect(() => {
+    if (activeBoardId != null && boardRevision > 0) refreshBoard(activeBoardId);
+  }, [boardRevision]);
 
   // ---------- Board CRUD ----------
   const onCreateBoard = async (name: string) => {

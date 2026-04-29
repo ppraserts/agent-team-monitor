@@ -292,6 +292,20 @@ pub fn get_column(conn: &Connection, id: i64) -> Result<BoardColumn> {
     )?)
 }
 
+pub fn find_column_by_title(conn: &Connection, board_id: i64, title: &str) -> Result<Option<BoardColumn>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, board_id, title, color, description, entry_criteria, exit_criteria, \
+                allowed_next_column_ids_json, position FROM board_columns \
+         WHERE board_id = ?1 AND lower(title) = lower(?2) \
+         ORDER BY position ASC, id ASC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![board_id, title], parse_column_row)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
 fn parse_column_row(r: &rusqlite::Row) -> Result<BoardColumn, rusqlite::Error> {
     let allowed_json: String = r.get(7)?;
     let allowed_next_column_ids: Vec<i64> =

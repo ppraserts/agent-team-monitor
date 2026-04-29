@@ -7,13 +7,14 @@ import {
   Loader2,
   Bot,
   UserRound,
+  KanbanSquare,
 } from "lucide-react";
 import { cn, statusColor } from "../lib/cn";
 import { memo, useEffect, useMemo, useState } from "react";
 
 interface FeedItem {
   ts: string;
-  kind: "message" | "tool" | "mention";
+  kind: "message" | "tool" | "mention" | "board";
   agentId: string;
   agentName: string;
   role: string;          // "user" | "assistant" | "tool"
@@ -21,10 +22,12 @@ interface FeedItem {
   fromAgentId?: string | null;
   fromAgentName?: string;
   status?: string;
+  ok?: boolean;
 }
 
 export function TeamFeed() {
   const agents = useStore((s) => s.agents);
+  const boardActivities = useStore((s) => s.boardActivities);
 
   // Tick to refresh "fresh" highlights — but only while there IS something
   // recent on screen. Constant 1Hz re-renders of the whole feed (which can
@@ -74,9 +77,22 @@ export function TeamFeed() {
         }
       }
     }
+    for (const a of boardActivities) {
+      const record = agents[a.agentId];
+      all.push({
+        ts: a.ts,
+        kind: "board",
+        role: "tool",
+        agentId: a.agentId,
+        agentName: record?.snapshot.spec.name ?? "Agent",
+        content: a.message,
+        status: record?.snapshot.status,
+        ok: a.ok,
+      });
+    }
     all.sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
     return all.slice(0, 100);
-  }, [agents]);
+  }, [agents, boardActivities]);
 
   const teamCount = Object.keys(agents).length;
   const mentionsCount = items.filter((i) => i.kind === "mention").length;
@@ -185,6 +201,40 @@ const FeedRow = memo(function FeedRow({
         <span className="font-medium text-base-300">{item.agentName}</span>
         <span className="text-(--color-accent-amber)">{item.content}</span>
         <span className="ml-auto text-[10px] text-base-600 font-mono">{time}</span>
+      </div>
+    );
+  }
+  if (item.kind === "board") {
+    return (
+      <div
+        className={cn(
+          "rounded-md border px-2 py-1.5 transition",
+          item.ok
+            ? fresh
+              ? "bg-(--color-accent-green)/10 border-(--color-accent-green)/35"
+              : "bg-base-800/35 border-base-700/45"
+            : "bg-(--color-accent-red)/10 border-(--color-accent-red)/35",
+        )}
+      >
+        <div className="flex items-center gap-1.5 text-[11px] mb-1">
+          <KanbanSquare
+            size={12}
+            className={item.ok ? "text-(--color-accent-green)" : "text-(--color-accent-red)"}
+          />
+          <span className="font-semibold text-base-200">{item.agentName}</span>
+          <span className={item.ok ? "text-(--color-accent-green)" : "text-(--color-accent-red)"}>
+            board
+          </span>
+          {fresh && (
+            <span className="ml-1 text-[9px] px-1 rounded bg-(--color-accent-green)/20 text-(--color-accent-green)">
+              LIVE
+            </span>
+          )}
+          <span className="ml-auto text-[10px] text-base-600 font-mono">{time}</span>
+        </div>
+        <div className="text-xs text-base-300 whitespace-pre-wrap line-clamp-2">
+          {item.content}
+        </div>
       </div>
     );
   }
