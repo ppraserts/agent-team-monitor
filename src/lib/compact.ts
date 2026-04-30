@@ -108,6 +108,7 @@ export async function respawnAgent(
   for (const m of oldMessages) {
     s.appendMessage(newSnap.id, { ...m, id: crypto.randomUUID() });
   }
+  s.carryChatViewCutoff(oldId, newSnap.id);
   s.appendMessage(newSnap.id, {
     id: crypto.randomUUID(),
     role: "system" as any,

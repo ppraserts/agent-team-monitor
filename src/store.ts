@@ -51,6 +51,8 @@ interface State {
     stderrTail: string[];
     ts: string;
   }[];
+  chatClearBefore: Record<string, string>;
+  activityClearBefore: string | null;
 
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
@@ -93,6 +95,9 @@ interface State {
     code: number | null,
     stderrTail: string[],
   ) => void;
+  clearChatView: (agentId: string) => void;
+  carryChatViewCutoff: (fromAgentId: string, toAgentId: string) => void;
+  clearActivityView: () => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -107,6 +112,8 @@ export const useStore = create<State>((set) => ({
   boardRevision: 0,
   boardActivities: [],
   processActivities: [],
+  chatClearBefore: {},
+  activityClearBefore: null,
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
@@ -272,4 +279,26 @@ export const useStore = create<State>((set) => ({
         ...s.processActivities,
       ].slice(0, 100),
     })),
+
+  clearChatView: (agentId) =>
+    set((s) => ({
+      chatClearBefore: {
+        ...s.chatClearBefore,
+        [agentId]: new Date().toISOString(),
+      },
+    })),
+
+  carryChatViewCutoff: (fromAgentId, toAgentId) =>
+    set((s) => {
+      const cutoff = s.chatClearBefore[fromAgentId];
+      if (!cutoff) return {};
+      return {
+        chatClearBefore: {
+          ...s.chatClearBefore,
+          [toAgentId]: cutoff,
+        },
+      };
+    }),
+
+  clearActivityView: () => set({ activityClearBefore: new Date().toISOString() }),
 }));

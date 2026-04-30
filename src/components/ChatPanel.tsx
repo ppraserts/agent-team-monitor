@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare, Eraser } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
@@ -64,6 +64,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
           { label: "/agent", insert: "/agent ", hint: "spawn agent from preset", mode: "replace-all" },
           { label: "/spawn", insert: "/spawn ", hint: "alias of /agent", mode: "replace-all" },
           { label: "/kill", insert: "/kill ", hint: "terminate agent by name", mode: "replace-all" },
+          { label: "/clear", insert: "/clear", hint: "clear this chat view only", mode: "replace-all" },
           { label: "/compact", insert: "/compact", hint: "summarize + restart this agent (frees context)", mode: "replace-all" },
           { label: "/list", insert: "/list", hint: "show current team", mode: "replace-all" },
           { label: "/help", insert: "/help", hint: "show all commands", mode: "replace-all" },
@@ -221,8 +222,15 @@ export function ChatPanel({ agentId, onClose }: Props) {
 
   const upsertAgent = useStore((s) => s.upsertAgent);
   const removeAgent = useStore((s) => s.removeAgent);
+  const clearChatView = useStore((s) => s.clearChatView);
+  const chatClearBefore = useStore((s) => s.chatClearBefore[agentId]);
   const messages = record?.messages ?? [];
-  const visualMessages = useMemo(() => [...messages].reverse(), [messages]);
+  const visibleMessages = useMemo(() => {
+    if (!chatClearBefore) return messages;
+    const cutoff = +new Date(chatClearBefore);
+    return messages.filter((m) => +new Date(m.ts) > cutoff);
+  }, [messages, chatClearBefore]);
+  const visualMessages = useMemo(() => [...visibleMessages].reverse(), [visibleMessages]);
 
   if (!record) return null;
   const { snapshot } = record;
