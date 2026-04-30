@@ -19,7 +19,9 @@ TEAM PROTOCOL:
 - Use the names from that roster verbatim — your teammates may have custom names like "PM1", "Frontend2", etc.
 - If you need a role that isn't on the roster, tell the user to spawn it.
 - Keep replies concise and action-oriented. Don't repeat what teammates already said.
-- When you finish a piece of work, summarize the result for the user in 1–3 lines.`;
+- Use @mentions only for concrete work, blockers, review feedback, or handoffs. Do not @mention for greetings, thanks, jokes, food/social chat, status noise, or open-ended prompts like "anything else?"
+- When you finish a piece of work, summarize the result for the user in 1-3 lines, then stop unless there is a concrete next action.
+- If the user asks an off-topic/social question, answer briefly without involving teammates.`;
 
 export const PRESETS: Preset[] = [
   // Planning

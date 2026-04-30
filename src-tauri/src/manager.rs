@@ -669,11 +669,13 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
         )
     };
 
+    let collaboration_protocol = "\n\n--- COLLABORATION DISCIPLINE ---\nUse @mentions only when you need concrete work, a blocker answer, review feedback, or a handoff from that teammate. Do not @mention for greetings, thanks, jokes, food/social chat, status noise, or open-ended prompts like \"anything else?\". When your assigned work is done, or there is no concrete next action, report the result to the user once and stop. If the user asks an off-topic/social question, answer briefly without involving teammates.\n";
+
     let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card, delete_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
 
     let new_prompt = match &spec.system_prompt {
-        Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}", p.trim_end(), roster_line, board_protocol)),
-        _ => Some(format!("{}{}", roster_line.trim_start(), board_protocol)),
+        Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}{}", p.trim_end(), roster_line, collaboration_protocol, board_protocol)),
+        _ => Some(format!("{}{}{}", roster_line.trim_start(), collaboration_protocol, board_protocol)),
     };
 
     AgentSpec {
@@ -1173,6 +1175,14 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
             });
             continue;
         }
+        if is_low_signal_mention(&msg) {
+            mgr.emit(AgentEvent::MentionBlocked {
+                from_agent_id: from_id.to_string(),
+                to_agent_name: to_name.clone(),
+                reason: "mention looks like social/off-task chatter".into(),
+            });
+            continue;
+        }
         by_target.entry(to_name).or_default().push(msg);
     }
 
@@ -1266,4 +1276,50 @@ fn find_mentions(text: &str) -> Vec<(String, String)> {
         out.push((to_name, msg));
     }
     out
+}
+
+fn is_low_signal_mention(msg: &str) -> bool {
+    let s = msg.trim().to_lowercase();
+    if s.chars().count() <= 3 {
+        return true;
+    }
+
+    // Conservative guard: block obvious chatter loops while keeping normal
+    // task handoffs, blockers, and review requests routable.
+    let exact_phrases = [
+        "thanks",
+        "thank you",
+        "ok",
+        "okay",
+        "got it",
+        "roger",
+        "รับทราบ",
+        "โอเค",
+        "ขอบคุณ",
+    ];
+    if exact_phrases.iter().any(|p| s == *p) {
+        return true;
+    }
+
+    let chatter_phrases = [
+        "anything else",
+        "anything more",
+        "want to eat",
+        "what do you want to eat",
+        "what would you like to eat",
+        "eat anything",
+        "haha",
+        "lol",
+        "อยากกิน",
+        "กินอะไร",
+        "กินไร",
+        "มีอะไรเพิ่ม",
+        "มีอะไรอีก",
+        "เพิ่มเติมไหม",
+        "ต้องการอะไรเพิ่ม",
+        "สวัสดี",
+        "ฮ่า",
+        "555",
+    ];
+    chatter_phrases.iter().any(|p| s.contains(p))
 }
