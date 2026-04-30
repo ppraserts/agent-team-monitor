@@ -242,6 +242,11 @@ fn prompt_arg_for_process(prompt: &str) -> String {
             .join(" ")
             .replace("<<", "[[")
             .replace(">>", "]]")
+            // The Windows npm `.cmd` shim can split a long prompt in ways that
+            // let examples like `git reset --hard` escape as real CLI flags.
+            // Keep the meaning readable for the model without leaving literal
+            // double-dash tokens in the process argument.
+            .replace("--", "dashdash ")
     }
     #[cfg(not(windows))]
     {

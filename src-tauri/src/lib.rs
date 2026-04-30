@@ -58,6 +58,7 @@ struct FsEntry {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PastedImagePayload {
     cwd: String,
     data_b64: String,
