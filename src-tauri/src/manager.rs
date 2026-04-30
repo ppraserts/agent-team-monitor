@@ -48,6 +48,7 @@ struct AgentHandle {
     /// is honored — the option is consumed on first use.
     kill_tx: Mutex<Option<oneshot::Sender<()>>>,
     last_activity: Arc<RwLock<chrono::DateTime<Utc>>>,
+    stderr_tail: Arc<RwLock<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -164,6 +165,7 @@ impl AgentManager {
             encode_user,
             kill_tx: Mutex::new(Some(kill_tx)),
             last_activity: Arc::new(RwLock::new(Utc::now())),
+            stderr_tail: Arc::new(RwLock::new(Vec::new())),
         });
 
         // Atomic insert into both indexes.
@@ -180,7 +182,7 @@ impl AgentManager {
 
         spawn_stdin_pump(stdin, stdin_rx);
         spawn_stdout_reader(self.clone(), id.clone(), stdout, adapter);
-        spawn_stderr_reader(self.clone(), id.clone(), stderr);
+        spawn_stderr_reader(self.clone(), id.clone(), stderr, handle.stderr_tail.clone());
         spawn_exit_watcher(self.clone(), id.clone(), child, kill_rx);
 
         let snap = snapshot_of(&handle);
@@ -231,6 +233,7 @@ impl AgentManager {
             let mut out = Vec::new();
             for board in board_list.iter().take(3) {
                 let cols = boards::list_columns(conn, board.id)?;
+                let cards = boards::list_cards_for_board(conn, board.id)?;
                 let col_lines = cols
                     .iter()
                     .map(|c| {
@@ -254,7 +257,28 @@ impl AgentManager {
                     })
                     .collect::<Vec<_>>()
                     .join(" | ");
-                out.push(format!("board {}#{}: {}", board.name, board.id, col_lines));
+                let card_lines = cards
+                    .iter()
+                    .take(25)
+                    .map(|card| {
+                        let lane = cols
+                            .iter()
+                            .find(|c| c.id == card.column_id)
+                            .map(|c| c.title.as_str())
+                            .unwrap_or("unknown");
+                        format!("{}#{} in {}#{}", card.title, card.id, lane, card.column_id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let cards_part = if card_lines.is_empty() {
+                    "cards: none".to_string()
+                } else {
+                    format!("cards: {}", card_lines)
+                };
+                out.push(format!(
+                    "board {}#{}: lanes: {} || {}",
+                    board.name, board.id, col_lines, cards_part,
+                ));
             }
             Ok(out)
         }) else {
@@ -267,9 +291,12 @@ impl AgentManager {
 
         format!(
             "[BOARD CONTEXT NOW]\n{}\n\
-             To create a task card, include exactly one JSON object in this format:\n\
-             <BOARD_ACTION>{{\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}}</BOARD_ACTION>\n\
-             Use existing board_id/column_id when possible. The app validates and creates the card; do not claim it was created unless the app confirms it.",
+             To change the board, include exactly one JSON object in <BOARD_ACTION>...</BOARD_ACTION>.\n\
+             Supported actions:\n\
+             create_card: {{\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}}\n\
+             move_card: {{\"action\":\"move_card\",\"card_id\":1,\"new_column_id\":2,\"new_position\":0}}\n\
+             update_card: {{\"action\":\"update_card\",\"card_id\":1,\"title\":\"New title\",\"description\":\"Updated context\",\"assignees\":[\"AgentName\"],\"labels\":[\"testing\"]}}\n\
+             Use existing ids from BOARD CONTEXT. The app validates lane rules and executes; do not claim success unless the app confirms it.",
             lines.join("\n")
         )
     }
@@ -434,10 +461,23 @@ fn spawn_stdout_reader(
     });
 }
 
-fn spawn_stderr_reader(mgr: AgentManager, agent_id: String, stderr: tokio::process::ChildStderr) {
+fn spawn_stderr_reader(
+    mgr: AgentManager,
+    agent_id: String,
+    stderr: tokio::process::ChildStderr,
+    stderr_tail: Arc<RwLock<Vec<String>>>,
+) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            {
+                let mut tail = stderr_tail.write();
+                tail.push(line.clone());
+                if tail.len() > 30 {
+                    let drop_count = tail.len() - 30;
+                    tail.drain(0..drop_count);
+                }
+            }
             mgr.emit(AgentEvent::Stderr { agent_id: agent_id.clone(), line });
         }
     });
@@ -464,6 +504,14 @@ fn spawn_exit_watcher(
             }
         };
 
+        let (agent_name, stderr_tail) = mgr
+            .registry
+            .read()
+            .by_id
+            .get(&agent_id)
+            .map(|h| (Some(h.spec.name.clone()), h.stderr_tail.read().clone()))
+            .unwrap_or((None, Vec::new()));
+
         // Clean up registry atomically before notifying the UI so that
         // subsequent re-spawn under the same name succeeds.
         mgr.remove(&agent_id);
@@ -473,7 +521,12 @@ fn spawn_exit_watcher(
             agent_id: agent_id.clone(),
             status: AgentStatus::Stopped,
         });
-        mgr.emit(AgentEvent::Exit { agent_id, code: exit_code });
+        mgr.emit(AgentEvent::Exit {
+            agent_id,
+            agent_name,
+            code: exit_code,
+            stderr_tail,
+        });
     });
 }
 
@@ -591,7 +644,7 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
         )
     };
 
-    let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, or subtasks, you may propose that the app creates a board card. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported now: {\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}. Use board/column ids from BOARD CONTEXT. Keep card titles short and actionable.\n";
+    let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
 
     let new_prompt = match &spec.system_prompt {
         Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}", p.trim_end(), roster_line, board_protocol)),
@@ -617,7 +670,18 @@ struct BoardActionRequest {
     lane: Option<String>,
     #[serde(default)]
     column: Option<String>,
-    title: String,
+    #[serde(default)]
+    card_id: Option<i64>,
+    #[serde(default)]
+    new_column_id: Option<i64>,
+    #[serde(default)]
+    to_lane: Option<String>,
+    #[serde(default)]
+    to_column: Option<String>,
+    #[serde(default)]
+    new_position: Option<usize>,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -631,17 +695,22 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
         let ts = Utc::now();
         let parsed = serde_json::from_str::<BoardActionRequest>(&raw);
         let result = match parsed {
-            Ok(req) => apply_board_action(mgr, &req),
+            Ok(req) => apply_board_action(mgr, &req).map(|card| (req.action, card)),
             Err(e) => Err(anyhow!("invalid BOARD_ACTION json: {}", e)),
         };
 
         match result {
-            Ok(card) => {
-                let msg = format!("created card #{}: {}", card.id, card.title);
+            Ok((action, card)) => {
+                let msg = match action.as_str() {
+                    "create_card" => format!("created card #{}: {}", card.id, card.title),
+                    "move_card" => format!("moved card #{}: {}", card.id, card.title),
+                    "update_card" => format!("updated card #{}: {}", card.id, card.title),
+                    _ => format!("applied {} to card #{}: {}", action, card.id, card.title),
+                };
                 let _ = mgr.db.save_tool_use(
                     &uuid::Uuid::new_v4().to_string(),
                     agent_id,
-                    "board.create_card",
+                    &format!("board.{}", action),
                     &serde_json::json!({
                         "card_id": card.id,
                         "column_id": card.column_id,
@@ -651,7 +720,7 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
                 );
                 mgr.emit(AgentEvent::BoardAction {
                     agent_id: agent_id.to_string(),
-                    action: "create_card".to_string(),
+                    action,
                     ok: true,
                     message: msg,
                     card: Some(card),
@@ -661,7 +730,7 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
             Err(e) => {
                 mgr.emit(AgentEvent::BoardAction {
                     agent_id: agent_id.to_string(),
-                    action: "create_card".to_string(),
+                    action: "board_action".to_string(),
                     ok: false,
                     message: e.to_string(),
                     card: None,
@@ -673,65 +742,122 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
 }
 
 fn apply_board_action(mgr: &AgentManager, req: &BoardActionRequest) -> Result<BoardCard> {
-    if req.action != "create_card" {
-        return Err(anyhow!("unsupported board action '{}'", req.action));
-    }
-    let title = req.title.trim();
-    if title.is_empty() {
-        return Err(anyhow!("card title is required"));
-    }
-    if title.chars().count() > 160 {
-        return Err(anyhow!("card title is too long"));
-    }
-
     mgr.db.with_conn(|conn| {
-        let board_id = match req.board_id {
-            Some(id) => id,
-            None => {
-                let board_list = boards::list_boards(conn)?;
-                if let Some(name) = req.board_name.as_deref() {
-                    board_list
-                        .iter()
-                        .find(|b| b.name.eq_ignore_ascii_case(name))
-                        .map(|b| b.id)
-                        .ok_or_else(|| anyhow!("board '{}' not found", name))?
-                } else {
-                    board_list
-                        .first()
-                        .map(|b| b.id)
-                        .ok_or_else(|| anyhow!("no boards exist yet"))?
-                }
-            }
-        };
-
-        let column_id = match req.column_id {
-            Some(id) => {
-                let col = boards::get_column(conn, id)?;
-                if col.board_id != board_id {
-                    return Err(anyhow!("column #{} is not on board #{}", id, board_id));
-                }
-                id
-            }
-            None => {
-                let lane = req
-                    .lane
+        match req.action.as_str() {
+            "create_card" => {
+                let title = req
+                    .title
                     .as_deref()
-                    .or(req.column.as_deref())
-                    .unwrap_or("Backlog");
-                boards::find_column_by_title(conn, board_id, lane)?
-                    .ok_or_else(|| anyhow!("lane '{}' not found on board #{}", lane, board_id))?
-                    .id
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("card title is required"))?;
+                if title.chars().count() > 160 {
+                    return Err(anyhow!("card title is too long"));
+                }
+                let board_id = resolve_board_id(conn, req)?;
+                let column_id = resolve_column_id(conn, req, board_id, req.column_id, req.lane.as_deref().or(req.column.as_deref()).or(Some("Backlog")))?;
+                let input = CardInput {
+                    title: title.to_string(),
+                    description: req.description.clone(),
+                    assignees: req.assignees.clone(),
+                    labels: req.labels.clone(),
+                };
+                boards::create_card(conn, column_id, &input)
             }
-        };
-
-        let input = CardInput {
-            title: title.to_string(),
-            description: req.description.clone(),
-            assignees: req.assignees.clone(),
-            labels: req.labels.clone(),
-        };
-        boards::create_card(conn, column_id, &input)
+            "move_card" => {
+                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+                let card = boards::get_card(conn, card_id)?;
+                let from_col = boards::get_column(conn, card.column_id)?;
+                let to_col_id = resolve_column_id(
+                    conn,
+                    req,
+                    from_col.board_id,
+                    req.new_column_id.or(req.column_id),
+                    req.to_lane.as_deref().or(req.to_column.as_deref()).or(req.lane.as_deref()).or(req.column.as_deref()),
+                )?;
+                validate_card_transition(conn, card.column_id, to_col_id)?;
+                boards::move_card(conn, card_id, to_col_id, req.new_position.unwrap_or(0))
+            }
+            "update_card" => {
+                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+                let current = boards::get_card(conn, card_id)?;
+                let title = req
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&current.title);
+                if title.chars().count() > 160 {
+                    return Err(anyhow!("card title is too long"));
+                }
+                let input = CardInput {
+                    title: title.to_string(),
+                    description: req.description.clone().or(current.description),
+                    assignees: if req.assignees.is_empty() { current.assignees } else { req.assignees.clone() },
+                    labels: if req.labels.is_empty() { current.labels } else { req.labels.clone() },
+                };
+                boards::update_card(conn, card_id, &input)
+            }
+            other => Err(anyhow!("unsupported board action '{}'", other)),
+        }
     })
+}
+
+fn resolve_board_id(conn: &rusqlite::Connection, req: &BoardActionRequest) -> Result<i64> {
+    if let Some(id) = req.board_id {
+        return Ok(id);
+    }
+    let board_list = boards::list_boards(conn)?;
+    if let Some(name) = req.board_name.as_deref() {
+        return board_list
+            .iter()
+            .find(|b| b.name.eq_ignore_ascii_case(name))
+            .map(|b| b.id)
+            .ok_or_else(|| anyhow!("board '{}' not found", name));
+    }
+    board_list
+        .first()
+        .map(|b| b.id)
+        .ok_or_else(|| anyhow!("no boards exist yet"))
+}
+
+fn resolve_column_id(
+    conn: &rusqlite::Connection,
+    _req: &BoardActionRequest,
+    board_id: i64,
+    explicit_id: Option<i64>,
+    lane_name: Option<&str>,
+) -> Result<i64> {
+    if let Some(id) = explicit_id {
+        let col = boards::get_column(conn, id)?;
+        if col.board_id != board_id {
+            return Err(anyhow!("column #{} is not on board #{}", id, board_id));
+        }
+        return Ok(id);
+    }
+    let lane = lane_name.ok_or_else(|| anyhow!("target lane or column id is required"))?;
+    boards::find_column_by_title(conn, board_id, lane)?
+        .map(|c| c.id)
+        .ok_or_else(|| anyhow!("lane '{}' not found on board #{}", lane, board_id))
+}
+
+fn validate_card_transition(conn: &rusqlite::Connection, from_col_id: i64, to_col_id: i64) -> Result<()> {
+    if from_col_id == to_col_id {
+        return Ok(());
+    }
+    let from = boards::get_column(conn, from_col_id)?;
+    let to = boards::get_column(conn, to_col_id)?;
+    if from.board_id != to.board_id {
+        return Err(anyhow!("cannot move cards across boards"));
+    }
+    if !from.allowed_next_column_ids.is_empty() && !from.allowed_next_column_ids.contains(&to_col_id) {
+        return Err(anyhow!(
+            "lane rule blocks moving from '{}' to '{}'",
+            from.title,
+            to.title,
+        ));
+    }
+    Ok(())
 }
 
 fn extract_tagged_blocks(text: &str, tag: &str) -> Vec<String> {

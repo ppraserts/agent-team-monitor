@@ -123,6 +123,11 @@ pub enum AgentEvent {
         card: Option<BoardCard>,
         ts: DateTime<Utc>,
     },
-    Exit { agent_id: String, code: Option<i32> },
+    Exit {
+        agent_id: String,
+        agent_name: Option<String>,
+        code: Option<i32>,
+        stderr_tail: Vec<String>,
+    },
     Stderr { agent_id: String, line: String },
 }

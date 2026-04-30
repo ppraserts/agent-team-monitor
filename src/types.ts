@@ -89,7 +89,13 @@ export type AgentEvent =
       card: BoardCard | null;
       ts: string;
     }
-  | { kind: "exit"; agent_id: string; code: number | null }
+  | {
+      kind: "exit";
+      agent_id: string;
+      agent_name: string | null;
+      code: number | null;
+      stderr_tail: string[];
+    }
   | { kind: "stderr"; agent_id: string; line: string };
 
 export interface ChatMessage {

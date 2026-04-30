@@ -15,7 +15,7 @@ export interface Proposal {
   end: number;
 }
 
-const RE = /<<PROPOSAL>>([\s\S]*?)<<END_PROPOSAL>>/g;
+const RE = /(?:<<PROPOSAL>>|\[\[PROPOSAL\]\])([\s\S]*?)(?:<<END_PROPOSAL>>|\[\[END_PROPOSAL\]\])/g;
 
 export function parseProposals(text: string): Proposal[] {
   const out: Proposal[] = [];

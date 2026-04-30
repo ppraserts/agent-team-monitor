@@ -76,3 +76,7 @@ html, body, #root {
     linear-gradient(90deg, color-mix(in oklch, var(--color-accent-cyan) 6%, transparent) 1px, transparent 1px);
   background-size: 32px 32px;
 }
+
+.overflow-anchor-none {
+  overflow-anchor: none;
+}

@@ -35,6 +35,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const forceStickRef = useRef(false);
+  const ignoreScrollRef = useRef(false);
 
   // Autocomplete state for `/commands` and `@mentions`.
   type SuggestItem = {
@@ -173,16 +174,20 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const [stuckToBottom, setStuckToBottom] = useState(true);
 
   const onScroll = () => {
+    if (ignoreScrollRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setStuckToBottom(distance < STICK_THRESHOLD);
+    setStuckToBottom(Math.abs(el.scrollTop) < STICK_THRESHOLD);
   };
 
   const scrollToBottom = () => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    ignoreScrollRef.current = true;
+    el.scrollTop = 0;
+    queueMicrotask(() => {
+      ignoreScrollRef.current = false;
+    });
   };
 
   // useLayoutEffect so the scroll happens BEFORE paint — no visible flash
@@ -194,8 +199,11 @@ export function ChatPanel({ agentId, onClose }: Props) {
       scrollToBottom();
       requestAnimationFrame(() => {
         scrollToBottom();
-        forceStickRef.current = false;
-        setStuckToBottom(true);
+        requestAnimationFrame(() => {
+          scrollToBottom();
+          forceStickRef.current = false;
+          setStuckToBottom(true);
+        });
       });
     }
     // If not stuck, leave scroll where the user put it. The Jump button
@@ -208,11 +216,13 @@ export function ChatPanel({ agentId, onClose }: Props) {
     setStuckToBottom(true);
   };
 
-  if (!record) return null;
-  const { snapshot, messages } = record;
-
   const upsertAgent = useStore((s) => s.upsertAgent);
   const removeAgent = useStore((s) => s.removeAgent);
+  const messages = record?.messages ?? [];
+  const visualMessages = useMemo(() => [...messages].reverse(), [messages]);
+
+  if (!record) return null;
+  const { snapshot } = record;
 
   // Local-only message used to surface slash-command feedback in the chat
   // (success / failure / help). Doesn't go through the agent.
@@ -351,7 +361,6 @@ Available presets: ${presetList}`,
     forceStickRef.current = true;
     setStuckToBottom(true);
     setInput("");
-    requestAnimationFrame(scrollToBottom);
 
     // Slash commands are intercepted locally (don't get sent to the agent).
     if (text.startsWith("/")) {
@@ -446,17 +455,9 @@ Available presets: ${presetList}`,
         <div
           ref={scrollRef}
           onScroll={onScroll}
-          className="absolute inset-0 overflow-y-auto p-3 space-y-2 scanline"
+          className="absolute inset-0 overflow-y-auto overflow-anchor-none p-3 flex flex-col-reverse gap-2 scanline"
         >
-          {messages.length === 0 && (
-            <div className="text-xs text-base-600 italic p-4 text-center">
-              No messages yet. Type below to start the conversation.
-              <br />
-              Tip: use <span className="text-(--color-accent-cyan)">@AgentName</span>{" "}
-              in the agent's reply to route to another agent.
-            </div>
-          )}
-          {messages.map((m) => (
+          {visualMessages.map((m) => (
             <MessageBubble
               key={m.id}
               msg={m}
@@ -466,6 +467,14 @@ Available presets: ${presetList}`,
               }
             />
           ))}
+          {visualMessages.length === 0 && (
+            <div className="text-xs text-base-600 italic p-4 text-center">
+              No messages yet. Type below to start the conversation.
+              <br />
+              Tip: use <span className="text-(--color-accent-cyan)">@AgentName</span>{" "}
+              in the agent's reply to route to another agent.
+            </div>
+          )}
         </div>
         {!stuckToBottom && messages.length > 0 && (
           <button

@@ -43,6 +43,14 @@ interface State {
     card: BoardCard | null;
     ts: string;
   }[];
+  processActivities: {
+    id: string;
+    agentId: string;
+    agentName: string | null;
+    code: number | null;
+    stderrTail: string[];
+    ts: string;
+  }[];
 
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
@@ -79,6 +87,12 @@ interface State {
     card: BoardCard | null,
     ts: string,
   ) => void;
+  appendProcessActivity: (
+    agentId: string,
+    agentName: string | null,
+    code: number | null,
+    stderrTail: string[],
+  ) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -92,6 +106,7 @@ export const useStore = create<State>((set) => ({
   agentCardLink: {},
   boardRevision: 0,
   boardActivities: [],
+  processActivities: [],
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
@@ -240,6 +255,21 @@ export const useStore = create<State>((set) => ({
       boardActivities: [
         { id: crypto.randomUUID(), agentId, action, ok, message, card, ts },
         ...s.boardActivities,
+      ].slice(0, 100),
+    })),
+
+  appendProcessActivity: (agentId, agentName, code, stderrTail) =>
+    set((s) => ({
+      processActivities: [
+        {
+          id: crypto.randomUUID(),
+          agentId,
+          agentName,
+          code,
+          stderrTail,
+          ts: new Date().toISOString(),
+        },
+        ...s.processActivities,
       ].slice(0, 100),
     })),
 }));

@@ -76,6 +76,7 @@ export default function App() {
   const removeAgent = useStore((s) => s.removeAgent);
   const removePty = useStore((s) => s.removePty);
   const appendBoardActivity = useStore((s) => s.appendBoardActivity);
+  const appendProcessActivity = useStore((s) => s.appendProcessActivity);
   const layout = useStore((s) => s.layout);
   const agents = useStore((s) => s.agents);
   const ptys = useStore((s) => s.ptys);
@@ -183,10 +184,24 @@ export default function App() {
           }
           break;
         case "exit":
+          appendProcessActivity(
+            ev.agent_id,
+            ev.agent_name,
+            ev.code,
+            ev.stderr_tail,
+          );
           // Drop any board-card linkage so the card stops showing
           // "working" once the underlying process is gone.
           useStore.getState().unlinkAgent(ev.agent_id);
           removeAgent(ev.agent_id);
+          break;
+        case "stderr":
+          appendMessage(ev.agent_id, {
+            id: crypto.randomUUID(),
+            role: "system" as any,
+            content: `[stderr] ${ev.line}`,
+            ts: new Date().toISOString(),
+          });
           break;
       }
     }).then((u) => {
@@ -211,6 +226,7 @@ export default function App() {
     applyUsage,
     removeAgent,
     appendBoardActivity,
+    appendProcessActivity,
   ]);
 
   useEffect(() => {
