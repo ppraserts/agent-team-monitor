@@ -296,13 +296,35 @@ impl AgentManager {
              create_card: {{\"action\":\"create_card\",\"board_id\":1,\"column_id\":2,\"title\":\"Short task\",\"description\":\"Useful context\",\"assignees\":[\"AgentName\"],\"labels\":[\"planning\"]}}\n\
              move_card: {{\"action\":\"move_card\",\"card_id\":1,\"new_column_id\":2,\"new_position\":0}}\n\
              update_card: {{\"action\":\"update_card\",\"card_id\":1,\"title\":\"New title\",\"description\":\"Updated context\",\"assignees\":[\"AgentName\"],\"labels\":[\"testing\"]}}\n\
-             Use existing ids from BOARD CONTEXT. The app validates lane rules and executes; do not claim success unless the app confirms it.",
+             delete_card: {{\"action\":\"delete_card\",\"card_id\":1}}\n\
+             Use existing ids from BOARD CONTEXT. The app validates lane rules and executes. Wait for [APP BOARD ACTION RESULT] before confirming what succeeded or failed.",
             lines.join("\n")
         )
     }
 
     pub async fn send(&self, agent_id: &str, message: String) -> Result<()> {
         self.send_internal(agent_id, message, None, None).await
+    }
+
+    async fn send_internal_note(&self, agent_id: &str, message: String) -> Result<()> {
+        let handle = self
+            .registry
+            .read()
+            .by_id
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("agent {} not found", agent_id))?;
+
+        let line = (handle.encode_user)(&message);
+        handle
+            .stdin_tx
+            .send(line)
+            .await
+            .context("failed to send internal note to agent stdin")?;
+
+        *handle.last_activity.write() = Utc::now();
+        self.set_status(agent_id, AgentStatus::Thinking);
+        Ok(())
     }
 
     /// Sends a message to an agent.
@@ -567,6 +589,9 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
         ParsedEvent::ToolUse { tool, input } => {
             mgr.set_status(agent_id, AgentStatus::Working);
             let ts = Utc::now();
+            if let Some(action) = tool.strip_prefix("board.") {
+                apply_board_tool_use(mgr, agent_id, action, &input, ts).await;
+            }
             let msg_id = uuid::Uuid::new_v4().to_string();
             if let Err(e) = mgr.db.save_tool_use(&msg_id, agent_id, &tool, &input, ts) {
                 tracing::warn!("db save_tool_use failed: {}", e);
@@ -644,7 +669,7 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
         )
     };
 
-    let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
+    let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card, delete_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
 
     let new_prompt = match &spec.system_prompt {
         Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}", p.trim_end(), roster_line, board_protocol)),
@@ -694,17 +719,24 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
     for raw in extract_tagged_blocks(text, "BOARD_ACTION").into_iter().take(5) {
         let ts = Utc::now();
         let parsed = serde_json::from_str::<BoardActionRequest>(&raw);
-        let result = match parsed {
-            Ok(req) => apply_board_action(mgr, &req).map(|card| (req.action, card)),
-            Err(e) => Err(anyhow!("invalid BOARD_ACTION json: {}", e)),
+        let (action, result) = match parsed {
+            Ok(req) => {
+                let action = req.action.clone();
+                (action, apply_board_action(mgr, &req))
+            }
+            Err(e) => (
+                "board_action".to_string(),
+                Err(anyhow!("invalid BOARD_ACTION json: {}", e)),
+            ),
         };
 
         match result {
-            Ok((action, card)) => {
+            Ok(card) => {
                 let msg = match action.as_str() {
                     "create_card" => format!("created card #{}: {}", card.id, card.title),
                     "move_card" => format!("moved card #{}: {}", card.id, card.title),
                     "update_card" => format!("updated card #{}: {}", card.id, card.title),
+                    "delete_card" => format!("deleted card #{}: {}", card.id, card.title),
                     _ => format!("applied {} to card #{}: {}", action, card.id, card.title),
                 };
                 let _ = mgr.db.save_tool_use(
@@ -718,6 +750,7 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
                     }),
                     ts,
                 );
+                send_board_action_result(mgr, agent_id, &action, true, &msg, Some(&card)).await;
                 mgr.emit(AgentEvent::BoardAction {
                     agent_id: agent_id.to_string(),
                     action,
@@ -728,16 +761,164 @@ async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text
                 });
             }
             Err(e) => {
+                let msg = e.to_string();
+                send_board_action_result(mgr, agent_id, &action, false, &msg, None).await;
                 mgr.emit(AgentEvent::BoardAction {
                     agent_id: agent_id.to_string(),
-                    action: "board_action".to_string(),
+                    action,
                     ok: false,
-                    message: e.to_string(),
+                    message: msg,
                     card: None,
                     ts,
                 });
             }
         }
+    }
+}
+
+async fn apply_board_tool_use(
+    mgr: &AgentManager,
+    agent_id: &str,
+    action: &str,
+    input: &serde_json::Value,
+    ts: chrono::DateTime<Utc>,
+) {
+    let req = board_action_from_tool_input(action, input);
+    match apply_board_action(mgr, &req) {
+        Ok(card) => {
+            let msg = match action {
+                "create_card" => format!("created card #{}: {}", card.id, card.title),
+                "move_card" => format!("moved card #{}: {}", card.id, card.title),
+                "update_card" => format!("updated card #{}: {}", card.id, card.title),
+                "delete_card" => format!("deleted card #{}: {}", card.id, card.title),
+                _ => format!("applied board.{} to card #{}: {}", action, card.id, card.title),
+            };
+            send_board_action_result(mgr, agent_id, action, true, &msg, Some(&card)).await;
+            mgr.emit(AgentEvent::BoardAction {
+                agent_id: agent_id.to_string(),
+                action: action.to_string(),
+                ok: true,
+                message: msg,
+                card: Some(card),
+                ts,
+            });
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            send_board_action_result(mgr, agent_id, action, false, &msg, None).await;
+            mgr.emit(AgentEvent::BoardAction {
+                agent_id: agent_id.to_string(),
+                action: action.to_string(),
+                ok: false,
+                message: msg,
+                card: None,
+                ts,
+            });
+        }
+    }
+}
+
+async fn send_board_action_result(
+    mgr: &AgentManager,
+    agent_id: &str,
+    action: &str,
+    ok: bool,
+    message: &str,
+    card: Option<&BoardCard>,
+) {
+    let card_context = card
+        .map(|card| {
+            format!(
+                "card_id={}\ncolumn_id={}\ntitle={}",
+                card.id, card.column_id, card.title
+            )
+        })
+        .unwrap_or_else(|| "card_id=unknown".to_string());
+    let note = format!(
+        "[APP BOARD ACTION RESULT]\n\
+         action={}\n\
+         status={}\n\
+         {}\n\
+         message={}\n\n\
+         The app has already attempted this board action. When you reply to the user, confirm from this result: list what is done, what failed, and what remains unknown. Do not issue another board action because of this result unless the user asks for more.",
+        action,
+        if ok { "ok" } else { "failed" },
+        card_context,
+        message
+    );
+
+    if let Err(e) = mgr.send_internal_note(agent_id, note).await {
+        tracing::warn!("failed to send board action result to agent {}: {}", agent_id, e);
+    }
+}
+
+fn board_action_from_tool_input(action: &str, input: &serde_json::Value) -> BoardActionRequest {
+    let get_i64 = |keys: &[&str]| -> Option<i64> {
+        keys.iter().find_map(|key| {
+            input
+                .get(*key)
+                .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))
+        })
+    };
+    let get_usize = |keys: &[&str]| -> Option<usize> {
+        keys.iter().find_map(|key| {
+            input
+                .get(*key)
+                .and_then(|v| v.as_u64().map(|n| n as usize).or_else(|| v.as_str()?.parse::<usize>().ok()))
+        })
+    };
+    let get_string = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            input
+                .get(*key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })
+    };
+    let get_vec = |keys: &[&str]| -> Vec<String> {
+        keys.iter()
+            .find_map(|key| input.get(*key))
+            .and_then(|v| {
+                if let Some(arr) = v.as_array() {
+                    Some(
+                        arr.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect(),
+                    )
+                } else {
+                    v.as_str().map(|s| {
+                        s.split(',')
+                            .map(str::trim)
+                            .filter(|x| !x.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect()
+                    })
+                }
+            })
+            .unwrap_or_default()
+    };
+
+    BoardActionRequest {
+        action: action.to_string(),
+        board_id: get_i64(&["board_id", "boardId"]),
+        board_name: get_string(&["board_name", "boardName", "board"]),
+        column_id: get_i64(&["column_id", "columnId"]),
+        lane: get_string(&["lane"]),
+        column: get_string(&["column"]),
+        card_id: get_i64(&["card_id", "cardId", "id"]),
+        new_column_id: get_i64(&["new_column_id", "newColumnId", "to_column_id", "toColumnId", "target_column_id", "targetColumnId"]),
+        to_lane: get_string(&["to_lane", "toLane", "target_lane", "targetLane"]),
+        to_column: get_string(&["to_column", "toColumn", "target_column", "targetColumn"]),
+        new_position: get_usize(&["new_position", "newPosition", "position"]),
+        title: get_string(&["title", "name"]),
+        description: get_string(&["description", "body", "notes"]),
+        assignees: get_vec(&["assignees", "assignee"]),
+        labels: get_vec(&["labels", "label"]),
     }
 }
 
@@ -798,6 +979,12 @@ fn apply_board_action(mgr: &AgentManager, req: &BoardActionRequest) -> Result<Bo
                 };
                 boards::update_card(conn, card_id, &input)
             }
+            "delete_card" => {
+                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+                let current = boards::get_card(conn, card_id)?;
+                boards::delete_card(conn, card_id)?;
+                Ok(current)
+            }
             other => Err(anyhow!("unsupported board action '{}'", other)),
         }
     })
@@ -850,7 +1037,7 @@ fn validate_card_transition(conn: &rusqlite::Connection, from_col_id: i64, to_co
     if from.board_id != to.board_id {
         return Err(anyhow!("cannot move cards across boards"));
     }
-    if !from.allowed_next_column_ids.is_empty() && !from.allowed_next_column_ids.contains(&to_col_id) {
+    if !workflow_reaches(conn, from.board_id, from_col_id, to_col_id)? {
         return Err(anyhow!(
             "lane rule blocks moving from '{}' to '{}'",
             from.title,
@@ -858,6 +1045,53 @@ fn validate_card_transition(conn: &rusqlite::Connection, from_col_id: i64, to_co
         ));
     }
     Ok(())
+}
+
+fn workflow_reaches(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    from_col_id: i64,
+    to_col_id: i64,
+) -> Result<bool> {
+    use std::collections::{HashSet, VecDeque};
+
+    let columns = boards::list_columns(conn, board_id)?;
+    let by_id = columns
+        .iter()
+        .map(|c| (c.id, c))
+        .collect::<std::collections::HashMap<_, _>>();
+    if !by_id.contains_key(&from_col_id) || !by_id.contains_key(&to_col_id) {
+        return Ok(false);
+    }
+
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::from([from_col_id]);
+    while let Some(id) = queue.pop_front() {
+        if id == to_col_id {
+            return Ok(true);
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(col) = by_id.get(&id) else {
+            continue;
+        };
+        let next_ids: Vec<i64> = if col.allowed_next_column_ids.is_empty() {
+            columns
+                .iter()
+                .filter(|c| c.id != id)
+                .map(|c| c.id)
+                .collect()
+        } else {
+            col.allowed_next_column_ids.clone()
+        };
+        for next in next_ids {
+            if !seen.contains(&next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn extract_tagged_blocks(text: &str, tag: &str) -> Vec<String> {

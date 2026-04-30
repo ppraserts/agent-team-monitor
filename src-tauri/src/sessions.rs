@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -70,6 +70,25 @@ pub fn list_external_sessions() -> Result<Vec<ExternalSession>> {
 
     out.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     Ok(out)
+}
+
+pub fn delete_external_session(jsonl_path: PathBuf) -> Result<()> {
+    let Some(home) = dirs::home_dir() else {
+        return Err(anyhow!("home directory not found"));
+    };
+    let projects_root = home.join(".claude").join("projects");
+    let root = projects_root.canonicalize()?;
+    let path = jsonl_path.canonicalize()?;
+
+    if !path.starts_with(&root) {
+        return Err(anyhow!("refusing to delete a session outside ~/.claude/projects"));
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return Err(anyhow!("refusing to delete non-jsonl session file"));
+    }
+
+    std::fs::remove_file(&path)?;
+    Ok(())
 }
 
 /// Claude Code encodes project paths by replacing path separators and `:` with `-`.

@@ -113,6 +113,8 @@ export default function App() {
           tool_input: m.tool_input,
         });
       }
+      await api.historyDeleteAgent(h.id).catch(() => {});
+      setActive(snap.id);
     } catch (e) {
       console.error("resume failed", e);
     }

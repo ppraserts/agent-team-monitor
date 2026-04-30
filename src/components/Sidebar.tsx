@@ -52,9 +52,13 @@ export function Sidebar({
   const [historyOpen, setHistoryOpen] = useState(true);
 
   useEffect(() => {
-    api.listExternalSessions().then(setExternals).catch(() => {});
+    refreshExternals();
     refreshHistory();
   }, []);
+
+  const refreshExternals = () => {
+    api.listExternalSessions().then(setExternals).catch(() => {});
+  };
 
   const refreshHistory = () => {
     api.historyListAgents(20).then(setHistory).catch(() => {});
@@ -241,7 +245,10 @@ export function Sidebar({
           )}
           {historyOpen &&
             pastAgents.slice(0, 20).map((h) => (
-              <HistoryRow key={h.id} h={h} onResume={() => onResume(h)} onDelete={async () => {
+              <HistoryRow key={h.id} h={h} onResume={async () => {
+                await onResume(h);
+                refreshHistory();
+              }} onDelete={async () => {
                 await api.historyDeleteAgent(h.id).catch(() => {});
                 refreshHistory();
               }} />
@@ -259,16 +266,29 @@ export function Sidebar({
             externals.slice(0, 30).map((e) => (
               <div
                 key={e.session_id}
-                className="px-2 py-1.5 rounded-md hover:bg-base-800/50 cursor-default"
+                className="group px-2 py-1.5 rounded-md hover:bg-base-800/50 cursor-default flex items-start gap-2"
                 title={e.jsonl_path}
               >
-                <div className="text-xs truncate flex items-center gap-1.5">
-                  <Folder size={11} className="text-base-500" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs truncate flex items-center gap-1.5">
+                  <Folder size={11} className="text-base-500 shrink-0" />
                   <span className="truncate">{e.project_path ?? e.project_dir}</span>
                 </div>
                 <div className="text-[10px] text-base-500 ml-4">
                   {e.session_id.slice(0, 8)} · {fmtBytes(e.size_bytes)}
                 </div>
+                </div>
+                <button
+                  onClick={async (ev) => {
+                    ev.stopPropagation();
+                    await api.deleteExternalSession(e.jsonl_path).catch(() => {});
+                    refreshExternals();
+                  }}
+                  className="shrink-0 opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red) text-xs transition leading-none mt-0.5"
+                  title="Delete external session file"
+                >
+                  ×
+                </button>
               </div>
             ))}
         </Section>
@@ -478,8 +498,8 @@ function HistoryRow({
         className="opacity-0 group-hover:opacity-100 text-(--color-accent-cyan) hover:text-(--color-accent-cyan) text-[11px] transition"
         title={
           h.session_id
-            ? `Resume Claude session ${h.session_id.slice(0, 8)}`
-            : "No session_id; will spawn fresh with this config"
+            ? `Restore Claude session ${h.session_id.slice(0, 8)} and remove this recent entry`
+            : "Restore as a new live agent and remove this recent entry"
         }
       >
         <RotateCcw size={12} />

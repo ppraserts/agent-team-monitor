@@ -36,6 +36,9 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const forceStickRef = useRef(false);
   const ignoreScrollRef = useRef(false);
+  const inputHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number | null>(null);
+  const draftBeforeHistoryRef = useRef("");
 
   // Autocomplete state for `/commands` and `@mentions`.
   type SuggestItem = {
@@ -360,6 +363,12 @@ Available presets: ${presetList}`,
     if (!text) return;
     forceStickRef.current = true;
     setStuckToBottom(true);
+    inputHistoryRef.current = [
+      text,
+      ...inputHistoryRef.current.filter((item) => item !== text),
+    ].slice(0, 100);
+    historyIndexRef.current = null;
+    draftBeforeHistoryRef.current = "";
     setInput("");
 
     // Slash commands are intercepted locally (don't get sent to the agent).
@@ -551,6 +560,8 @@ Available presets: ${presetList}`,
             value={input}
             onChange={(e) => {
               setInput(e.target.value);
+              historyIndexRef.current = null;
+              draftBeforeHistoryRef.current = "";
               refreshSuggest(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onSelect={(e) => {
@@ -589,6 +600,59 @@ Available presets: ${presetList}`,
                 if (e.key === "Escape") {
                   e.preventDefault();
                   setSuggest(null);
+                  return;
+                }
+              }
+              if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                const ta = e.currentTarget;
+                const atStart = ta.selectionStart === 0 && ta.selectionEnd === 0;
+                const singleLine = !ta.value.includes("\n");
+                if (atStart || singleLine) {
+                  const history = inputHistoryRef.current;
+                  if (history.length > 0) {
+                    e.preventDefault();
+                    if (historyIndexRef.current == null) {
+                      draftBeforeHistoryRef.current = input;
+                      historyIndexRef.current = 0;
+                    } else {
+                      historyIndexRef.current = Math.min(
+                        history.length - 1,
+                        historyIndexRef.current + 1,
+                      );
+                    }
+                    const next = history[historyIndexRef.current] ?? "";
+                    setInput(next);
+                    setSuggest(null);
+                    requestAnimationFrame(() => {
+                      const current = textareaRef.current;
+                      if (current) current.selectionStart = current.selectionEnd = next.length;
+                    });
+                    return;
+                  }
+                }
+              }
+              if (e.key === "ArrowDown" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                const ta = e.currentTarget;
+                const atEnd = ta.selectionStart === ta.value.length && ta.selectionEnd === ta.value.length;
+                const singleLine = !ta.value.includes("\n");
+                if ((atEnd || singleLine) && historyIndexRef.current != null) {
+                  e.preventDefault();
+                  const history = inputHistoryRef.current;
+                  historyIndexRef.current -= 1;
+                  const next =
+                    historyIndexRef.current >= 0
+                      ? history[historyIndexRef.current] ?? ""
+                      : draftBeforeHistoryRef.current;
+                  if (historyIndexRef.current < 0) {
+                    historyIndexRef.current = null;
+                    draftBeforeHistoryRef.current = "";
+                  }
+                  setInput(next);
+                  setSuggest(null);
+                  requestAnimationFrame(() => {
+                    const current = textareaRef.current;
+                    if (current) current.selectionStart = current.selectionEnd = next.length;
+                  });
                   return;
                 }
               }

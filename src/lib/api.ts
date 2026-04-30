@@ -60,6 +60,8 @@ export const api = {
 
   listExternalSessions: () =>
     invoke<ExternalSession[]>("list_external_sessions"),
+  deleteExternalSession: (jsonlPath: string) =>
+    invoke<void>("delete_external_session", { jsonlPath }),
   listVendors: () => invoke<VendorInfo[]>("list_available_vendors"),
   runtimeDiagnostics: () => invoke<RuntimeDiagnostics>("runtime_diagnostics"),
   homeDir: () => invoke<string | null>("home_dir"),

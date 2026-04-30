@@ -106,6 +106,11 @@ fn list_external_sessions() -> Result<Vec<ExternalSession>, String> {
     sessions::list_external_sessions().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn delete_external_session(jsonl_path: String) -> Result<(), String> {
+    sessions::delete_external_session(jsonl_path.into()).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VendorInfo {
     name: String,
@@ -514,6 +519,7 @@ pub fn run() {
             pty_kill,
             pty_list,
             list_external_sessions,
+            delete_external_session,
             list_available_vendors,
             runtime_diagnostics,
             home_dir,
