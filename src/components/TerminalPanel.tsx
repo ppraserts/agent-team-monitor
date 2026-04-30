@@ -10,9 +10,10 @@ import { useStore } from "../store";
 interface Props {
   ptyId: string;
   onClose?: () => void;
+  chrome?: boolean;
 }
 
-export function TerminalPanel({ ptyId, onClose }: Props) {
+export function TerminalPanel({ ptyId, onClose, chrome = true }: Props) {
   const snap = useStore((s) => s.ptys[ptyId]);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
@@ -98,18 +99,20 @@ export function TerminalPanel({ ptyId, onClose }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-base-950 border border-(--color-accent-violet)/30 rounded-lg overflow-hidden">
-      <div className="px-3 py-2 border-b border-base-800 flex items-center gap-2 bg-base-900/80">
-        <div className="w-2 h-2 rounded-full bg-(--color-accent-violet)" />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold truncate">{snap.title}</div>
-          <div className="text-[10px] text-base-500 truncate font-mono">{snap.cwd}</div>
+      {chrome && (
+        <div className="px-3 py-2 border-b border-base-800 flex items-center gap-2 bg-base-900/80">
+          <div className="w-2 h-2 rounded-full bg-(--color-accent-violet)" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-semibold truncate">{snap.title}</div>
+            <div className="text-[10px] text-base-500 truncate font-mono">{snap.cwd}</div>
+          </div>
+          {onClose && (
+            <button onClick={onClose} className="text-base-500 hover:text-base-200">
+              <X size={14} />
+            </button>
+          )}
         </div>
-        {onClose && (
-          <button onClick={onClose} className="text-base-500 hover:text-base-200">
-            <X size={14} />
-          </button>
-        )}
-      </div>
+      )}
       <div ref={containerRef} className="flex-1 p-2" />
     </div>
   );

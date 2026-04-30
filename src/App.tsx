@@ -5,6 +5,10 @@ import {
   Network,
   Eye,
   Zap,
+  Files,
+  Plus,
+  X,
+  PanelBottomClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
@@ -15,18 +19,20 @@ import { TerminalPanel } from "./components/TerminalPanel";
 import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
 import { BoardsPanel } from "./components/BoardsDialog";
+import { FileTreePanel } from "./components/FileTreePanel";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
 import { UsagePanel } from "./components/UsagePanel";
+import { WorkspaceToolbar } from "./components/WorkspaceToolbar";
 import { useStore } from "./store";
 import { api } from "./lib/api";
 import { compactAgent } from "./lib/compact";
-import type { AgentEvent, HistoryAgent } from "./types";
+import type { AgentEvent, HistoryAgent, WorkspaceTool } from "./types";
 import { cn } from "./lib/cn";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-type RightPaneMode = "feed" | "graph" | "usage" | "off";
+type RightPaneMode = "feed" | "graph" | "usage" | "files" | "off";
 
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -38,6 +44,8 @@ export default function App() {
   const [rightPane, setRightPane] = useState<RightPaneMode>("feed");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [terminalTrayOpen, setTerminalTrayOpen] = useState(false);
+  const [workspaceDir, setWorkspaceDir] = useState("");
 
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const startResize = useCallback((e: React.MouseEvent) => {
@@ -74,6 +82,7 @@ export default function App() {
   const setHomeDir = useStore((s) => s.setHomeDir);
   const setVendors = useStore((s) => s.setVendors);
   const removeAgent = useStore((s) => s.removeAgent);
+  const upsertPty = useStore((s) => s.upsertPty);
   const removePty = useStore((s) => s.removePty);
   const appendBoardActivity = useStore((s) => s.appendBoardActivity);
   const appendProcessActivity = useStore((s) => s.appendProcessActivity);
@@ -81,9 +90,11 @@ export default function App() {
   const agents = useStore((s) => s.agents);
   const ptys = useStore((s) => s.ptys);
   const setActive = useStore((s) => s.setActive);
+  const activeTileId = useStore((s) => s.activeTileId);
 
   useEffect(() => {
     api.homeDir().then(setHomeDir).catch(() => {});
+    api.workspaceDir().then(setWorkspaceDir).catch(() => {});
     api.listVendors().then(setVendors).catch(() => {});
     api.listAgents().then((arr) => arr.forEach(upsertAgent)).catch(() => {});
     // Load persisted theme on first paint.
@@ -119,6 +130,45 @@ export default function App() {
       console.error("resume failed", e);
     }
   };
+
+  const openWorkspaceTerminal = useCallback(async () => {
+    const cwd = workspaceDir || (await api.workspaceDir());
+    const title = nextPtyTitle("Terminal", cwd);
+    const snap = await api.spawnPty({
+      title,
+      cwd,
+      program: "powershell.exe",
+      args: [],
+    });
+    upsertPty(snap);
+    setActive(snap.id);
+    setTerminalTrayOpen(true);
+  }, [setActive, upsertPty, workspaceDir]);
+
+  const openWorkspaceShell = useCallback(async (tool: WorkspaceTool) => {
+    const cwd = workspaceDir || (await api.workspaceDir());
+    const program =
+      tool.binary && tool.binary !== "in-app"
+        ? tool.binary
+        : tool.id === "wsl"
+          ? "wsl.exe"
+          : "bash.exe";
+    const args =
+      tool.id === "wsl"
+        ? ["--cd", cwd]
+        : tool.id === "git_bash"
+          ? ["--login", "-i"]
+          : [];
+    const snap = await api.spawnPty({
+      title: nextPtyTitle(tool.name, cwd),
+      cwd,
+      program,
+      args,
+    });
+    upsertPty(snap);
+    setActive(snap.id);
+    setTerminalTrayOpen(true);
+  }, [setActive, upsertPty, workspaceDir]);
 
   // Use a ref so the unlisten function is captured the moment listen() resolves,
   // even if the effect's cleanup has already run. The `cancelled` flag handles
@@ -249,7 +299,21 @@ export default function App() {
     };
   }, [removePty]);
 
-  const tiles = layout.filter((id) => agents[id] || ptys[id]);
+  useEffect(() => {
+    if (activeTileId && ptys[activeTileId]) {
+      setTerminalTrayOpen(true);
+    }
+    if (Object.keys(ptys).length === 0) {
+      setTerminalTrayOpen(false);
+    }
+  }, [activeTileId, ptys]);
+
+  const tiles = layout.filter((id) => agents[id]);
+  const terminalIds = Object.keys(ptys);
+  const activeTerminalId =
+    activeTileId && ptys[activeTileId]
+      ? activeTileId
+      : terminalIds[terminalIds.length - 1] ?? null;
 
   return (
     <div className="h-screen w-screen flex bg-base-950 text-base-200 grid-bg">
@@ -263,8 +327,21 @@ export default function App() {
       />
 
       <main className="flex-1 flex flex-col min-w-0">
-        <div className="h-11 border-b border-base-800 px-3 flex items-center gap-3 bg-base-900/40 backdrop-blur">
-          <div className="flex items-center gap-1 text-xs text-base-500">
+        <div className="relative z-[120] h-11 border-b border-base-800 px-3 flex items-center gap-2 bg-base-900/95 backdrop-blur min-w-0">
+          {workspaceDir && (
+            <WorkspaceToolbar
+              cwd={workspaceDir}
+              filesActive={rightPane === "files" && !rightCollapsed}
+              onTerminal={openWorkspaceTerminal}
+              onShell={openWorkspaceShell}
+              onToggleFiles={() => {
+                setRightPane(rightPane === "files" ? "off" : "files");
+                setRightCollapsed(false);
+              }}
+            />
+          )}
+          <div className="h-6 w-px bg-base-800 shrink-0" />
+          <div className="min-w-0 flex items-center gap-1 text-xs text-base-500 overflow-hidden">
             {leftCollapsed && (
               <ToolbarBtn
                 active={false}
@@ -274,9 +351,9 @@ export default function App() {
               />
             )}
             <LayoutGrid size={12} />
-            <span>{tiles.length} pane{tiles.length === 1 ? "" : "s"}</span>
+            <span className="truncate">{tiles.length} pane{tiles.length === 1 ? "" : "s"}</span>
           </div>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto shrink-0 flex items-center gap-1">
             <ToolbarBtn
               active={rightPane === "feed"}
               onClick={() => setRightPane(rightPane === "feed" ? "off" : "feed")}
@@ -295,6 +372,12 @@ export default function App() {
               icon={<Zap size={13} />}
               label="Usage"
             />
+            <ToolbarBtn
+              active={rightPane === "files"}
+              onClick={() => setRightPane(rightPane === "files" ? "off" : "files")}
+              icon={<Files size={13} />}
+              label="Files"
+            />
             {rightPane !== "off" && (
               <ToolbarIconBtn
                 onClick={() => setRightCollapsed((v) => !v)}
@@ -308,56 +391,68 @@ export default function App() {
         <div className="flex-1 flex min-h-0">
           {/* Vertical split: agents (top) / boards (bottom) */}
           <div ref={splitContainerRef} className="flex-1 min-w-0 flex flex-col">
-            <div
-              className="min-h-0 p-3 overflow-auto"
-              style={{
-                flex: boardsOpen ? `0 0 ${(1 - boardSplit) * 100}%` : "1 1 100%",
-              }}
-            >
-              {tiles.length === 0 ? (
-                <EmptyState onSpawn={() => setSpawnOpen(true)} />
-              ) : (
-                <div
-                  className="grid gap-3 h-full"
-                  style={{
-                    gridTemplateColumns: `repeat(${gridCols(tiles.length)}, minmax(0, 1fr))`,
-                    gridAutoRows: "minmax(0, 1fr)",
-                  }}
-                >
-                  {tiles.map((id) => (
-                    <div
-                      key={id}
-                      className="min-h-0 min-w-0"
-                      onClick={() => setActive(id)}
-                    >
-                      {agents[id] ? (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <div
+                className="min-h-0 p-3 overflow-auto"
+                style={{
+                  flex: boardsOpen ? `0 0 ${(1 - boardSplit) * 100}%` : "1 1 100%",
+                }}
+              >
+                {tiles.length === 0 ? (
+                  <EmptyState onSpawn={() => setSpawnOpen(true)} />
+                ) : (
+                  <div
+                    className="grid gap-3 h-full"
+                    style={{
+                      gridTemplateColumns: `repeat(${gridCols(tiles.length)}, minmax(0, 1fr))`,
+                      gridAutoRows: "minmax(0, 1fr)",
+                    }}
+                  >
+                    {tiles.map((id) => (
+                      <div
+                        key={id}
+                        className="min-h-0 min-w-0"
+                        onClick={() => setActive(id)}
+                      >
                         <ChatPanel agentId={id} />
-                      ) : ptys[id] ? (
-                        <TerminalPanel ptyId={id} />
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {boardsOpen && (
+                <>
+                  {/* Drag handle to resize the split */}
+                  <div
+                    onMouseDown={startResize}
+                    className="h-1 shrink-0 cursor-row-resize bg-base-800 hover:bg-(--color-accent-cyan)/60 transition relative group"
+                    title="Drag to resize"
+                  >
+                    <div className="absolute inset-x-0 -top-0.5 h-2" />
+                  </div>
+                  <div
+                    className="min-h-0"
+                    style={{ flex: `0 0 ${boardSplit * 100}%` }}
+                  >
+                    <BoardsPanel onClose={() => setBoardsOpen(false)} />
+                  </div>
+                </>
               )}
             </div>
 
-            {boardsOpen && (
-              <>
-                {/* Drag handle to resize the split */}
-                <div
-                  onMouseDown={startResize}
-                  className="h-1 shrink-0 cursor-row-resize bg-base-800 hover:bg-(--color-accent-cyan)/60 transition relative group"
-                  title="Drag to resize"
-                >
-                  <div className="absolute inset-x-0 -top-0.5 h-2" />
-                </div>
-                <div
-                  className="min-h-0"
-                  style={{ flex: `0 0 ${boardSplit * 100}%` }}
-                >
-                  <BoardsPanel onClose={() => setBoardsOpen(false)} />
-                </div>
-              </>
+            {terminalTrayOpen && terminalIds.length > 0 && activeTerminalId && (
+              <TerminalTray
+                ids={terminalIds}
+                activeId={activeTerminalId}
+                onActive={setActive}
+                onNew={openWorkspaceTerminal}
+                onCloseTray={() => setTerminalTrayOpen(false)}
+                onKill={async (id) => {
+                  await api.killPty(id).catch(() => {});
+                  removePty(id);
+                }}
+              />
             )}
           </div>
 
@@ -377,6 +472,9 @@ export default function App() {
               {rightPane === "feed" && <TeamFeed />}
               {rightPane === "graph" && <AgentGraph mentionPulse={mentionPulse} />}
               {rightPane === "usage" && <UsagePanel />}
+              {rightPane === "files" && (
+                <FileTreePanel root={workspaceDir} onClose={() => setRightPane("off")} />
+              )}
             </div>
           )}
         </div>
@@ -396,6 +494,8 @@ function ToolbarBtn({
   return (
     <button
       onClick={onClick}
+      title={label}
+      aria-label={label}
       className={cn(
         "px-2 py-1 text-xs rounded-md flex items-center gap-1 transition border",
         active
@@ -403,7 +503,7 @@ function ToolbarBtn({
           : "text-base-400 hover:text-base-200 border-transparent hover:bg-base-800/50",
       )}
     >
-      {icon} {label}
+      {icon} <span className="hidden 2xl:inline">{label}</span>
     </button>
   );
 }
@@ -426,6 +526,86 @@ function ToolbarIconBtn({
     >
       {icon}
     </button>
+  );
+}
+
+function TerminalTray({
+  ids,
+  activeId,
+  onActive,
+  onNew,
+  onCloseTray,
+  onKill,
+}: {
+  ids: string[];
+  activeId: string;
+  onActive: (id: string) => void;
+  onNew: () => void;
+  onCloseTray: () => void;
+  onKill: (id: string) => void;
+}) {
+  const ptys = useStore((s) => s.ptys);
+  const active = ptys[activeId] ? activeId : ids[0];
+
+  return (
+    <div className="h-[34vh] min-h-52 shrink-0 border-t border-base-800 bg-base-950/95 flex flex-col">
+      <div className="h-9 shrink-0 px-3 border-b border-base-800 bg-base-900/80 flex items-center gap-2">
+        <div className="flex items-center gap-4 text-[11px] tracking-wide text-base-500 uppercase">
+          <span className="text-base-300 border-b border-(--color-accent-cyan) py-2">
+            Terminal
+          </span>
+        </div>
+        <div className="h-5 w-px bg-base-800" />
+        <div className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto">
+          {ids.map((id) => {
+            const p = ptys[id];
+            if (!p) return null;
+            return (
+              <button
+                key={id}
+                onClick={() => onActive(id)}
+                className={cn(
+                  "group h-7 max-w-44 px-2 rounded-md flex items-center gap-2 text-xs border transition shrink-0",
+                  active === id
+                    ? "bg-base-800 text-base-100 border-base-700"
+                    : "text-base-500 border-transparent hover:text-base-200 hover:bg-base-800/60",
+                )}
+                title={p.cwd}
+              >
+                <span className="truncate">{p.title}</span>
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onKill(id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red)"
+                  title="Kill terminal"
+                >
+                  <X size={12} />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <button
+          onClick={onNew}
+          className="h-7 w-7 rounded-md text-base-500 hover:text-base-100 hover:bg-base-800 flex items-center justify-center"
+          title="New terminal"
+        >
+          <Plus size={15} />
+        </button>
+        <button
+          onClick={onCloseTray}
+          className="h-7 w-7 rounded-md text-base-500 hover:text-base-100 hover:bg-base-800 flex items-center justify-center"
+          title="Hide terminal panel"
+        >
+          <PanelBottomClose size={15} />
+        </button>
+      </div>
+      <div className="flex-1 min-h-0 p-2">
+        <TerminalPanel ptyId={active} chrome={false} />
+      </div>
+    </div>
   );
 }
 
@@ -464,6 +644,12 @@ function RightRail({
         onClick={() => onMode("usage")}
         icon={<Zap size={15} />}
         label="Usage"
+      />
+      <RailButton
+        active={mode === "files"}
+        onClick={() => onMode("files")}
+        icon={<Files size={15} />}
+        label="Files"
       />
     </div>
   );
@@ -522,6 +708,17 @@ function gridCols(n: number): number {
   if (n <= 4) return 2;
   if (n <= 9) return 3;
   return 4;
+}
+
+function nextPtyTitle(base: string, cwd: string): string {
+  const used = new Set(
+    Object.values(useStore.getState().ptys)
+      .filter((p) => p.cwd === cwd)
+      .map((p) => p.title),
+  );
+  let i = 1;
+  while (used.has(`${base} ${i}`)) i += 1;
+  return `${base} ${i}`;
 }
 
 /// Fire-and-forget: when a result event arrives, peek at the agent's current

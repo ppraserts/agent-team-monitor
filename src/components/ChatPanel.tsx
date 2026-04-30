@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare, Eraser } from "lucide-react";
+import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare, Image as ImageIcon } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
@@ -9,7 +9,7 @@ import { compactAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
 import { AgentSettingsDialog } from "./AgentSettingsDialog";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, ImageAttachment } from "../types";
 
 /// Default model context window for the bar denominator. Sonnet/Opus are 200k,
 /// Haiku is 200k. Override per-model later if needed.
@@ -30,6 +30,8 @@ export function ChatPanel({ agentId, onClose }: Props) {
     ),
   );
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [pasteBusy, setPasteBusy] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -222,7 +224,6 @@ export function ChatPanel({ agentId, onClose }: Props) {
 
   const upsertAgent = useStore((s) => s.upsertAgent);
   const removeAgent = useStore((s) => s.removeAgent);
-  const clearChatView = useStore((s) => s.clearChatView);
   const chatClearBefore = useStore((s) => s.chatClearBefore[agentId]);
   const messages = record?.messages ?? [];
   const visibleMessages = useMemo(() => {
@@ -368,29 +369,71 @@ Available presets: ${presetList}`,
 
   const submit = async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text && attachments.length === 0) return;
+    const attachmentBlock =
+      attachments.length > 0
+        ? [
+            "",
+            "[Attached screenshots]",
+            ...attachments.map((a, i) => `${i + 1}. ${a.name}: ${a.path}`),
+            "Use these local image file paths as visual references when answering.",
+          ].join("\n")
+        : "";
+    const outgoing = `${text}${attachmentBlock}`.trim();
     forceStickRef.current = true;
     setStuckToBottom(true);
     inputHistoryRef.current = [
-      text,
-      ...inputHistoryRef.current.filter((item) => item !== text),
+      outgoing,
+      ...inputHistoryRef.current.filter((item) => item !== outgoing),
     ].slice(0, 100);
     historyIndexRef.current = null;
     draftBeforeHistoryRef.current = "";
     setInput("");
+    setAttachments([]);
 
     // Slash commands are intercepted locally (don't get sent to the agent).
-    if (text.startsWith("/")) {
+    if (outgoing.startsWith("/")) {
       // Echo the user's typed command so they can see what they ran.
-      pushLocal(text);
-      const handled = await handleSlashCommand(text);
+      pushLocal(outgoing);
+      const handled = await handleSlashCommand(outgoing);
       if (handled) return;
     }
 
     try {
-      await api.sendAgent(agentId, text);
+      await api.sendAgent(agentId, outgoing);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageItems = Array.from(e.clipboardData.items).filter((item) =>
+      item.type.startsWith("image/"),
+    );
+    if (imageItems.length === 0) return;
+    e.preventDefault();
+    setPasteBusy(true);
+    try {
+      const saved: ImageAttachment[] = [];
+      for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const dataB64 = await fileToBase64(file);
+        const att = await api.savePastedImage({
+          cwd: snapshot.spec.cwd,
+          dataB64,
+          mime: file.type || item.type,
+          name: file.name || "screenshot",
+        });
+        saved.push(att);
+      }
+      if (saved.length > 0) {
+        setAttachments((prev) => [...prev, ...saved]);
+      }
+    } catch (err) {
+      pushLocal(`Paste image failed: ${err}`);
+    } finally {
+      setPasteBusy(false);
     }
   };
 
@@ -566,6 +609,7 @@ Available presets: ${presetList}`,
           <textarea
             ref={textareaRef}
             value={input}
+            onPaste={handlePaste}
             onChange={(e) => {
               setInput(e.target.value);
               historyIndexRef.current = null;
@@ -677,12 +721,41 @@ Available presets: ${presetList}`,
             type="button"
             onMouseDown={(e) => e.preventDefault()}
             onClick={submit}
-            disabled={!input.trim()}
+            disabled={!input.trim() && attachments.length === 0}
             className="px-3 py-2 rounded-md bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center gap-1"
           >
             <Send size={14} />
           </button>
         </div>
+        {(attachments.length > 0 || pasteBusy) && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {attachments.map((att) => (
+              <div
+                key={att.id}
+                className="h-8 max-w-full px-2 rounded-md border border-base-700 bg-base-950 flex items-center gap-2 text-xs text-base-300"
+                title={att.path}
+              >
+                <ImageIcon size={13} className="text-(--color-accent-cyan) shrink-0" />
+                <span className="truncate max-w-56">{att.name}</span>
+                <button
+                  onClick={() =>
+                    setAttachments((prev) => prev.filter((item) => item.id !== att.id))
+                  }
+                  className="text-base-500 hover:text-(--color-accent-red) shrink-0"
+                  title="Remove attachment"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+            {pasteBusy && (
+              <div className="h-8 px-2 rounded-md border border-base-700 bg-base-950 flex items-center gap-2 text-xs text-base-500">
+                <ImageIcon size={13} />
+                Saving pasted image...
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -964,6 +1037,19 @@ function ContextBar({
       )}
     </div>
   );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("failed to read image"));
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function summarizeToolInput(input: unknown): string {

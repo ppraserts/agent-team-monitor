@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type {
   AgentSnapshot,
   AgentSpec,
@@ -9,8 +9,11 @@ import type {
   CcusageReport,
   CustomPreset,
   ExternalSession,
+  FsEntry,
+  GitStatus,
   HistoryAgent,
   HistoryMessage,
+  ImageAttachment,
   PtySnapshot,
   RuntimeDiagnostics,
   SkillEntry,
@@ -18,7 +21,25 @@ import type {
   SkillScope,
   UsageStats,
   VendorInfo,
+  WorkspaceTool,
 } from "../types";
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const hasTauriBackend =
+    typeof window !== "undefined" &&
+    "__TAURI_INTERNALS__" in window &&
+    typeof (window as any).__TAURI_INTERNALS__?.invoke === "function";
+
+  if (!hasTauriBackend) {
+    return Promise.reject(
+      new Error(
+        "Tauri backend is not available. Open the app with `npm.cmd run tauri dev` or the desktop build; backend actions such as spawning agents do not work in a plain browser tab.",
+      ),
+    );
+  }
+
+  return tauriInvoke<T>(command, args);
+}
 
 export const api = {
   spawnAgent: (spec: AgentSpec) =>
@@ -65,6 +86,19 @@ export const api = {
   listVendors: () => invoke<VendorInfo[]>("list_available_vendors"),
   runtimeDiagnostics: () => invoke<RuntimeDiagnostics>("runtime_diagnostics"),
   homeDir: () => invoke<string | null>("home_dir"),
+  workspaceDir: () => invoke<string>("workspace_dir"),
+  workspaceTools: () => invoke<WorkspaceTool[]>("workspace_tools"),
+  workspaceOpenTool: (toolId: string, cwd: string) =>
+    invoke<void>("workspace_open_tool", { toolId, cwd }),
+  openPathExternal: (path: string) => invoke<void>("open_path_external", { path }),
+  fsListDir: (path: string) => invoke<FsEntry[]>("fs_list_dir", { path }),
+  savePastedImage: (payload: {
+    cwd: string;
+    dataB64: string;
+    mime: string;
+    name?: string | null;
+  }) => invoke<ImageAttachment>("save_pasted_image", { payload }),
+  gitStatus: (cwd: string) => invoke<GitStatus>("git_status", { cwd }),
 
   // History / persistence
   historyListAgents: (limit?: number) =>

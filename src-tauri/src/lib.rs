@@ -7,6 +7,8 @@ mod pty;
 mod sessions;
 mod skills;
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -14,11 +16,11 @@ use once_cell::sync::OnceCell;
 use serde::Serialize;
 
 use crate::agent::{AgentSnapshot, AgentSpec, ResumeOptions};
+use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
 use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, UsageStats};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
-use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
 use crate::skills::{SkillEntry, SkillKind, SkillScope};
 
 static AGENT_MGR: OnceCell<AgentManager> = OnceCell::new();
@@ -39,6 +41,46 @@ fn format_error(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceTool {
+    id: String,
+    name: String,
+    kind: String,
+    binary: Option<String>,
+    available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PastedImagePayload {
+    cwd: String,
+    data_b64: String,
+    mime: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ImageAttachment {
+    id: String,
+    name: String,
+    path: String,
+    mime: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitStatus {
+    branch: Option<String>,
+    changed_count: usize,
+    summary: Vec<String>,
+    is_repo: bool,
+}
+
 // ---------- Agent commands ----------
 
 #[tauri::command]
@@ -47,7 +89,10 @@ async fn agent_spawn(spec: AgentSpec) -> Result<AgentSnapshot, String> {
 }
 
 #[tauri::command]
-async fn agent_resume(spec: AgentSpec, session_id: Option<String>) -> Result<AgentSnapshot, String> {
+async fn agent_resume(
+    spec: AgentSpec,
+    session_id: Option<String>,
+) -> Result<AgentSnapshot, String> {
     agent_mgr()
         .spawn_with_resume(spec, ResumeOptions { session_id })
         .await
@@ -56,7 +101,10 @@ async fn agent_resume(spec: AgentSpec, session_id: Option<String>) -> Result<Age
 
 #[tauri::command]
 async fn agent_send(agent_id: String, message: String) -> Result<(), String> {
-    agent_mgr().send(&agent_id, message).await.map_err(format_error)
+    agent_mgr()
+        .send(&agent_id, message)
+        .await
+        .map_err(format_error)
 }
 
 #[tauri::command]
@@ -143,7 +191,11 @@ fn list_available_vendors() -> Vec<VendorInfo> {
     let mut out = Vec::new();
     for (name, vargs) in candidates {
         if let Some((bin, ver)) = which_with_version(name, vargs) {
-            out.push(VendorInfo { name: name.to_string(), binary: bin, version: ver });
+            out.push(VendorInfo {
+                name: name.to_string(),
+                binary: bin,
+                version: ver,
+            });
         }
     }
     out
@@ -194,9 +246,17 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
 
     let bins: Vec<String> = {
         #[cfg(windows)]
-        { vec![format!("{}.cmd", name), format!("{}.exe", name), name.to_string()] }
+        {
+            vec![
+                format!("{}.cmd", name),
+                format!("{}.exe", name),
+                name.to_string(),
+            ]
+        }
         #[cfg(not(windows))]
-        { vec![name.to_string()] }
+        {
+            vec![name.to_string()]
+        }
     };
 
     for bin in &bins {
@@ -204,7 +264,9 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
             if out.status.success() {
                 if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
                     let path = line.trim().to_string();
-                    if path.is_empty() { continue; }
+                    if path.is_empty() {
+                        continue;
+                    }
                     let version = std::process::Command::new(&path)
                         .args(args)
                         .output()
@@ -212,7 +274,9 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
                         .and_then(|o| {
                             if o.status.success() {
                                 Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                            } else { None }
+                            } else {
+                                None
+                            }
                         });
                     return Some((path, version));
                 }
@@ -225,6 +289,332 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
 #[tauri::command]
 fn home_dir() -> Option<String> {
     dirs::home_dir().and_then(|p| p.to_str().map(|s| s.to_string()))
+}
+
+#[tauri::command]
+fn workspace_dir() -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .unwrap_or(manifest_dir.as_path())
+        .display()
+        .to_string()
+}
+
+#[tauri::command]
+fn workspace_tools() -> Vec<WorkspaceTool> {
+    vec![
+        tool(
+            "vscode",
+            "VS Code",
+            "editor",
+            &["code.cmd", "code.exe", "code"],
+            &[],
+        ),
+        tool(
+            "cursor",
+            "Cursor",
+            "editor",
+            &["cursor.cmd", "cursor.exe", "cursor"],
+            &[],
+        ),
+        tool(
+            "visual_studio",
+            "Visual Studio",
+            "editor",
+            &["devenv.exe"],
+            &[
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\devenv.exe",
+                r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\devenv.exe",
+            ],
+        ),
+        WorkspaceTool {
+            id: "file_explorer".into(),
+            name: "File Explorer".into(),
+            kind: "file_explorer".into(),
+            binary: Some("explorer.exe".into()),
+            available: cfg!(windows),
+        },
+        WorkspaceTool {
+            id: "terminal".into(),
+            name: "Terminal".into(),
+            kind: "terminal".into(),
+            binary: Some("in-app".into()),
+            available: true,
+        },
+        tool(
+            "git_bash",
+            "Git Bash",
+            "shell",
+            &[],
+            &[
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files (x86)\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+                r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+            ],
+        ),
+        tool("wsl", "WSL", "shell", &["wsl.exe"], &[]),
+    ]
+}
+
+#[tauri::command]
+fn workspace_open_tool(tool_id: String, cwd: String) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    match tool_id.as_str() {
+        "vscode" | "cursor" | "visual_studio" => {
+            let tools = workspace_tools();
+            let Some(t) = tools.into_iter().find(|t| t.id == tool_id && t.available) else {
+                return Err(format!("tool '{}' is not available", tool_id));
+            };
+            let Some(bin) = t.binary else {
+                return Err(format!("tool '{}' has no executable", tool_id));
+            };
+            Command::new(bin)
+                .arg(&cwd)
+                .spawn()
+                .map_err(|e| format!("failed to open {}: {}", t.name, e))?;
+            Ok(())
+        }
+        "file_explorer" => open_path(&cwd),
+        "git_bash" => {
+            let bin = workspace_tools()
+                .into_iter()
+                .find(|t| t.id == "git_bash" && t.available)
+                .and_then(|t| t.binary)
+                .ok_or_else(|| "Git Bash is not available".to_string())?;
+            Command::new(bin)
+                .arg("--cd")
+                .arg(&cwd)
+                .spawn()
+                .map_err(|e| format!("failed to open Git Bash: {}", e))?;
+            Ok(())
+        }
+        "wsl" => {
+            Command::new("wsl.exe")
+                .current_dir(&cwd)
+                .spawn()
+                .map_err(|e| format!("failed to open WSL: {}", e))?;
+            Ok(())
+        }
+        "terminal" => Ok(()),
+        other => Err(format!("unknown workspace tool '{}'", other)),
+    }
+}
+
+#[tauri::command]
+fn open_path_external(path: String) -> Result<(), String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    open_path(&path)
+}
+
+#[tauri::command]
+fn fs_list_dir(path: String) -> Result<Vec<FsEntry>, String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    let rd = std::fs::read_dir(&path).map_err(|e| format!("read_dir failed: {}", e))?;
+    let mut out = Vec::new();
+    for entry in rd.flatten() {
+        let p = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".git" || name == "node_modules" || name == "target" || name == "dist" {
+            continue;
+        }
+        out.push(FsEntry {
+            name,
+            path: p.display().to_string(),
+            is_dir: p.is_dir(),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+#[tauri::command]
+fn save_pasted_image(payload: PastedImagePayload) -> Result<ImageAttachment, String> {
+    let cwd = validate_workspace_path(&payload.cwd).map_err(|e| e.to_string())?;
+    let ext = match payload.mime.as_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        other => return Err(format!("unsupported image type '{}'", other)),
+    };
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.data_b64.as_bytes())
+        .map_err(|e| format!("invalid image data: {}", e))?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let safe_name = payload
+        .name
+        .as_deref()
+        .map(sanitize_file_stem)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "screenshot".to_string());
+    let dir = cwd.join(".agent-team-monitor").join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create attachment dir failed: {}", e))?;
+    let file_name = format!("{}-{}.{}", safe_name, &id[..8], ext);
+    let path = dir.join(file_name);
+    std::fs::write(&path, bytes).map_err(|e| format!("write image failed: {}", e))?;
+    Ok(ImageAttachment {
+        id,
+        name: path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("attachment.{}", ext)),
+        path: path.display().to_string(),
+        mime: payload.mime,
+    })
+}
+
+#[tauri::command]
+fn git_status(cwd: String) -> Result<GitStatus, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    let inside = Command::new("git")
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("failed to run git: {}", e))?;
+    if !inside.status.success() {
+        return Ok(GitStatus {
+            branch: None,
+            changed_count: 0,
+            summary: Vec::new(),
+            is_repo: false,
+        });
+    }
+    let branch_out = Command::new("git")
+        .arg("branch")
+        .arg("--show-current")
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("failed to read git branch: {}", e))?;
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
+    let status_out = Command::new("git")
+        .arg("status")
+        .arg("--short")
+        .current_dir(&cwd)
+        .output()
+        .map_err(|e| format!("failed to read git status: {}", e))?;
+    let summary: Vec<String> = String::from_utf8_lossy(&status_out.stdout)
+        .lines()
+        .take(30)
+        .map(|s| s.to_string())
+        .collect();
+    Ok(GitStatus {
+        branch: if branch.is_empty() {
+            None
+        } else {
+            Some(branch)
+        },
+        changed_count: summary.len(),
+        summary,
+        is_repo: true,
+    })
+}
+
+fn sanitize_file_stem(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(40)
+        .collect()
+}
+
+fn tool(
+    id: &str,
+    name: &str,
+    kind: &str,
+    path_names: &[&str],
+    common_paths: &[&str],
+) -> WorkspaceTool {
+    let binary = find_binary(path_names).or_else(|| {
+        common_paths
+            .iter()
+            .find(|p| Path::new(*p).is_file())
+            .map(|p| (*p).to_string())
+    });
+    WorkspaceTool {
+        id: id.into(),
+        name: name.into(),
+        kind: kind.into(),
+        available: binary.is_some(),
+        binary,
+    }
+}
+
+fn find_binary(names: &[&str]) -> Option<String> {
+    #[cfg(windows)]
+    let finder = "where";
+    #[cfg(not(windows))]
+    let finder = "which";
+    for name in names {
+        if let Ok(out) = Command::new(finder).arg(name).output() {
+            if out.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                    let p = line.trim();
+                    if !p.is_empty() {
+                        return Some(p.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn validate_workspace_path(path: &str) -> anyhow::Result<PathBuf> {
+    let root = PathBuf::from(workspace_dir()).canonicalize()?;
+    let candidate = PathBuf::from(path);
+    let full = if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    }
+    .canonicalize()?;
+    if !full.starts_with(&root) {
+        anyhow::bail!("path is outside workspace");
+    }
+    Ok(full)
+}
+
+fn open_path(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to open File Explorer: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to open path: {}", e))?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to open path: {}", e))?;
+    }
+    Ok(())
 }
 
 // ---------- ccusage: parse ~/.claude/projects/*.jsonl for global Claude usage ----------
@@ -277,7 +667,10 @@ async fn run_ccusage(args: &[&str]) -> Result<serde_json::Value, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let out = cmd.output().await.map_err(|e| format!("spawn npx ccusage failed: {e}"))?;
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn npx ccusage failed: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "ccusage exit {}: {}",
@@ -286,8 +679,12 @@ async fn run_ccusage(args: &[&str]) -> Result<serde_json::Value, String> {
         ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("parse ccusage json failed: {e}; raw={}", stdout.chars().take(200).collect::<String>()))
+    serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!(
+            "parse ccusage json failed: {e}; raw={}",
+            stdout.chars().take(200).collect::<String>()
+        )
+    })
 }
 
 // ---------- History / persistence commands ----------
@@ -396,7 +793,8 @@ fn skills_default_body(kind: SkillKind, name: String) -> String {
 
 #[tauri::command]
 fn boards_list() -> Result<Vec<Board>, String> {
-    db().with_conn(|c| boards::list_boards(c)).map_err(|e| e.to_string())
+    db().with_conn(|c| boards::list_boards(c))
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn boards_create(name: String, description: Option<String>) -> Result<Board, String> {
@@ -410,7 +808,8 @@ fn boards_update(id: i64, name: String, description: Option<String>) -> Result<B
 }
 #[tauri::command]
 fn boards_delete(id: i64) -> Result<(), String> {
-    db().with_conn(|c| boards::delete_board(c, id)).map_err(|e| e.to_string())
+    db().with_conn(|c| boards::delete_board(c, id))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -449,11 +848,12 @@ fn columns_update(
             &allowed_next_column_ids,
         )
     })
-        .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn columns_delete(id: i64) -> Result<(), String> {
-    db().with_conn(|c| boards::delete_column(c, id)).map_err(|e| e.to_string())
+    db().with_conn(|c| boards::delete_column(c, id))
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn columns_reorder(board_id: i64, ordered_ids: Vec<i64>) -> Result<(), String> {
@@ -478,7 +878,8 @@ fn cards_update(id: i64, input: CardInput) -> Result<BoardCard, String> {
 }
 #[tauri::command]
 fn cards_delete(id: i64) -> Result<(), String> {
-    db().with_conn(|c| boards::delete_card(c, id)).map_err(|e| e.to_string())
+    db().with_conn(|c| boards::delete_card(c, id))
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn cards_move(card_id: i64, new_column_id: i64, new_position: usize) -> Result<BoardCard, String> {
@@ -523,6 +924,13 @@ pub fn run() {
             list_available_vendors,
             runtime_diagnostics,
             home_dir,
+            workspace_dir,
+            workspace_tools,
+            workspace_open_tool,
+            open_path_external,
+            fs_list_dir,
+            save_pasted_image,
+            git_status,
             ccusage_report,
             skills_list,
             skills_save,

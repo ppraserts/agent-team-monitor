@@ -122,6 +122,40 @@ export interface VendorInfo {
   version: string | null;
 }
 
+export type WorkspaceToolKind =
+  | "editor"
+  | "file_explorer"
+  | "terminal"
+  | "shell";
+
+export interface WorkspaceTool {
+  id: string;
+  name: string;
+  kind: WorkspaceToolKind;
+  binary: string | null;
+  available: boolean;
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface ImageAttachment {
+  id: string;
+  name: string;
+  path: string;
+  mime: string;
+}
+
+export interface GitStatus {
+  branch: string | null;
+  changed_count: number;
+  summary: string[];
+  is_repo: boolean;
+}
+
 export interface RuntimeCheck {
   name: string;
   binary: string | null;
