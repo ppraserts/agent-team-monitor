@@ -35,6 +35,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [pasteBusy, setPasteBusy] = useState(false);
+  const [dragOverComposer, setDragOverComposer] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -413,23 +414,21 @@ Available presets: ${presetList}`,
     }
   };
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const imageItems = Array.from(e.clipboardData.items).filter((item) =>
-      item.type.startsWith("image/"),
-    );
-    if (imageItems.length === 0) return;
-    e.preventDefault();
+  const saveImageFiles = async (files: File[], source: "Paste" | "Drop") => {
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    if (imageFiles.length === 0) {
+      if (files.length > 0) pushLocal(`${source} ignored: only image files are supported.`);
+      return;
+    }
     setPasteBusy(true);
     try {
       const saved: ImageAttachment[] = [];
-      for (const item of imageItems) {
-        const file = item.getAsFile();
-        if (!file) continue;
+      for (const file of imageFiles) {
         const dataB64 = await fileToBase64(file);
         const att = await api.savePastedImage({
           cwd: snapshot.spec.cwd,
           dataB64,
-          mime: file.type || item.type,
+          mime: file.type,
           name: file.name || "screenshot",
         });
         saved.push(att);
@@ -438,10 +437,33 @@ Available presets: ${presetList}`,
         setAttachments((prev) => [...prev, ...saved]);
       }
     } catch (err) {
-      pushLocal(`Paste image failed: ${err}`);
+      pushLocal(`${source} image failed: ${err}`);
     } finally {
       setPasteBusy(false);
     }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const clipboardFiles = Array.from(e.clipboardData.files);
+    const files =
+      clipboardFiles.length > 0
+        ? clipboardFiles
+        : Array.from(e.clipboardData.items)
+            .filter((item) => item.type.startsWith("image/"))
+            .map((item) => item.getAsFile())
+            .filter((file): file is File => !!file);
+    if (files.length === 0) return;
+    e.preventDefault();
+    await saveImageFiles(dedupeFiles(files), "Paste");
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverComposer(false);
+    await saveImageFiles(files, "Drop");
   };
 
   return (
@@ -595,7 +617,25 @@ Available presets: ${presetList}`,
       />
 
       {/* Input */}
-      <div className="border-t border-base-800 p-2 bg-base-900/80">
+      <div
+        className={cn(
+          "border-t border-base-800 p-2 bg-base-900/80 transition",
+          dragOverComposer && "bg-(--color-accent-cyan)/10 border-(--color-accent-cyan)/40",
+        )}
+        onDragOver={(e) => {
+          if (Array.from(e.dataTransfer.types).includes("Files")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            setDragOverComposer(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setDragOverComposer(false);
+          }
+        }}
+        onDrop={handleDrop}
+      >
         <div className="flex items-end gap-2 relative">
           {/* Autocomplete dropdown */}
           {suggest && suggest.items.length > 0 && (
@@ -1072,6 +1112,18 @@ function fileToBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function dedupeFiles(files: File[]): File[] {
+  const seen = new Set<string>();
+  const out: File[] = [];
+  for (const file of files) {
+    const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(file);
+  }
+  return out;
 }
 
 function summarizeToolInput(input: unknown): string {
