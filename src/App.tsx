@@ -27,7 +27,13 @@ import { WorkspaceToolbar } from "./components/WorkspaceToolbar";
 import { useStore } from "./store";
 import { api } from "./lib/api";
 import { compactAgent } from "./lib/compact";
-import type { AgentEvent, HistoryAgent, WorkspaceTool } from "./types";
+import {
+  isInsideWorkspace,
+  shortPath,
+  workspaceContextFromWorkspace,
+  workspaceNameFromPath,
+} from "./lib/workspace";
+import type { AgentEvent, HistoryAgent, Workspace, WorkspaceTool } from "./types";
 import { cn } from "./lib/cn";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -81,6 +87,12 @@ export default function App() {
   const applyUsage = useStore((s) => s.applyUsage);
   const setHomeDir = useStore((s) => s.setHomeDir);
   const setVendors = useStore((s) => s.setVendors);
+  const workspaces = useStore((s) => s.workspaces);
+  const setWorkspaces = useStore((s) => s.setWorkspaces);
+  const upsertWorkspace = useStore((s) => s.upsertWorkspace);
+  const removeWorkspace = useStore((s) => s.removeWorkspace);
+  const setActiveWorkspace = useStore((s) => s.setActiveWorkspace);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
   const removeAgent = useStore((s) => s.removeAgent);
   const upsertPty = useStore((s) => s.upsertPty);
   const removePty = useStore((s) => s.removePty);
@@ -94,14 +106,57 @@ export default function App() {
 
   useEffect(() => {
     api.homeDir().then(setHomeDir).catch(() => {});
-    api.workspaceDir().then(setWorkspaceDir).catch(() => {});
+    api.workspaceDir()
+      .then(async (dir) => {
+        const workspace = await api.workspacesBootstrap(dir);
+        const list = await api.workspacesList();
+        setWorkspaces(list);
+        setWorkspaceDir(workspace.root_path);
+        setActiveWorkspace(workspaceContextFromWorkspace(workspace));
+        const missions = await api.missionsList(workspace.id).catch(() => []);
+        useStore.getState().setMissions(missions);
+      })
+      .catch(() => {});
     api.listVendors().then(setVendors).catch(() => {});
     api.listAgents().then((arr) => arr.forEach(upsertAgent)).catch(() => {});
     // Load persisted theme on first paint.
     api.settingsGetAll()
       .then((s) => applyTheme((s.theme as any) || "cyan"))
       .catch(() => {});
-  }, [setHomeDir, setVendors, upsertAgent]);
+  }, [setHomeDir, setVendors, setWorkspaces, setActiveWorkspace, upsertAgent]);
+
+  const activateWorkspace = useCallback(async (workspace: Workspace) => {
+    await api.workspacesTouch(workspace.id).catch(() => {});
+    setWorkspaceDir(workspace.root_path);
+    setActiveWorkspace(workspaceContextFromWorkspace(workspace));
+    const missions = await api.missionsList(workspace.id).catch(() => []);
+    useStore.getState().setMissions(missions);
+  }, [setActiveWorkspace]);
+
+  const addWorkspace = useCallback(async (rootPath: string) => {
+    const workspace = await api.workspacesBootstrap(rootPath);
+    const list = await api.workspacesList().catch(() => null);
+    if (list) setWorkspaces(list);
+    else upsertWorkspace(workspace);
+    await activateWorkspace(workspace);
+  }, [activateWorkspace, setWorkspaces, upsertWorkspace]);
+
+  const removeWorkspaceFromList = useCallback(async (workspace: Workspace) => {
+    await api.workspacesRemove(workspace.id);
+    removeWorkspace(workspace.id);
+    const list = await api.workspacesList().catch(() => []);
+    setWorkspaces(list);
+    if (activeWorkspace?.id === workspace.id) {
+      const next = list[0] ?? null;
+      if (next) {
+        await activateWorkspace(next);
+      } else {
+        setWorkspaceDir("");
+        setActiveWorkspace(null);
+        useStore.getState().setMissions([]);
+      }
+    }
+  }, [activateWorkspace, activeWorkspace?.id, removeWorkspace, setActiveWorkspace, setWorkspaces]);
 
   /// Resume a past agent: spawn fresh with --resume <session_id>, then
   /// pre-populate the chat panel with prior messages from the local DB.
@@ -137,13 +192,14 @@ export default function App() {
     const snap = await api.spawnPty({
       title,
       cwd,
+      workspaceId: activeWorkspace?.id ?? null,
       program: "powershell.exe",
       args: [],
     });
     upsertPty(snap);
     setActive(snap.id);
     setTerminalTrayOpen(true);
-  }, [setActive, upsertPty, workspaceDir]);
+  }, [activeWorkspace?.id, setActive, upsertPty, workspaceDir]);
 
   const openWorkspaceShell = useCallback(async (tool: WorkspaceTool) => {
     const cwd = workspaceDir || (await api.workspaceDir());
@@ -162,13 +218,14 @@ export default function App() {
     const snap = await api.spawnPty({
       title: nextPtyTitle(tool.name, cwd),
       cwd,
+      workspaceId: activeWorkspace?.id ?? null,
       program,
       args,
     });
     upsertPty(snap);
     setActive(snap.id);
     setTerminalTrayOpen(true);
-  }, [setActive, upsertPty, workspaceDir]);
+  }, [activeWorkspace?.id, setActive, upsertPty, workspaceDir]);
 
   // Use a ref so the unlisten function is captured the moment listen() resolves,
   // even if the effect's cleanup has already run. The `cancelled` flag handles
@@ -308,8 +365,18 @@ export default function App() {
     }
   }, [activeTileId, ptys]);
 
-  const tiles = layout.filter((id) => agents[id]);
-  const terminalIds = Object.keys(ptys);
+  const inActiveWorkspace = useCallback((cwd: string, workspaceId?: string | null) => {
+    if (!activeWorkspace) return true;
+    return workspaceId === activeWorkspace.id || isInsideWorkspace(cwd, activeWorkspace.root);
+  }, [activeWorkspace]);
+
+  const tiles = layout.filter((id) => {
+    const agent = agents[id];
+    return agent && inActiveWorkspace(agent.snapshot.spec.cwd, agent.snapshot.spec.workspace_id);
+  });
+  const terminalIds = Object.keys(ptys).filter((id) =>
+    inActiveWorkspace(ptys[id].cwd, (ptys[id] as any).workspace_id),
+  );
   const activeTerminalId =
     activeTileId && ptys[activeTileId]
       ? activeTileId
@@ -331,6 +398,11 @@ export default function App() {
           {workspaceDir && (
             <WorkspaceToolbar
               cwd={workspaceDir}
+              activeWorkspaceId={activeWorkspace?.id ?? null}
+              workspaces={workspaces}
+              onSelectWorkspace={activateWorkspace}
+              onAddWorkspace={addWorkspace}
+              onRemoveWorkspace={removeWorkspaceFromList}
               filesActive={rightPane === "files" && !rightCollapsed}
               onTerminal={openWorkspaceTerminal}
               onShell={openWorkspaceShell}
@@ -573,6 +645,9 @@ function TerminalTray({
                 title={p.cwd}
               >
                 <span className="truncate">{p.title}</span>
+                <span className="hidden xl:inline text-[10px] text-base-500 truncate max-w-24">
+                  {workspaceNameFromPath(p.cwd)}
+                </span>
                 <span
                   onClick={(e) => {
                     e.stopPropagation();
@@ -602,8 +677,15 @@ function TerminalTray({
           <PanelBottomClose size={15} />
         </button>
       </div>
-      <div className="flex-1 min-h-0 p-2">
-        <TerminalPanel ptyId={active} chrome={false} />
+      <div className="flex-1 min-h-0 p-2 flex flex-col">
+        {ptys[active] && (
+          <div className="mb-1 px-1 text-[10px] text-base-500 font-mono truncate">
+            Workspace: {workspaceNameFromPath(ptys[active].cwd)} · {shortPath(ptys[active].cwd)}
+          </div>
+        )}
+        <div className="flex-1 min-h-0">
+          <TerminalPanel ptyId={active} chrome={false} />
+        </div>
       </div>
     </div>
   );
@@ -684,15 +766,28 @@ function RailButton({
 }
 
 function EmptyState({ onSpawn }: { onSpawn: () => void }) {
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
+  const body = activeWorkspace ? (
+    <>
+      Active workspace:{" "}
+      <span className="text-(--color-accent-cyan) font-mono">
+        {activeWorkspace.name}
+      </span>
+      . Spawn agents here, then assign cards or message them with workspace
+      context attached automatically.
+    </>
+  ) : (
+    <>
+      Spawn multiple Claude agents that can work in parallel and talk to each
+      other using <span className="text-(--color-accent-cyan)">@AgentName</span>.
+      Watch them collaborate in the Activity feed and Graph view.
+    </>
+  );
   return (
     <div className="h-full flex flex-col items-center justify-center text-center">
       <div className="text-6xl mb-4 select-none">⌬</div>
       <div className="text-lg font-semibold mb-1">Multi-Agent Control Center</div>
-      <div className="text-sm text-base-500 mb-6 max-w-md">
-        Spawn multiple Claude agents that can work in parallel and talk to each
-        other using <span className="text-(--color-accent-cyan)">@AgentName</span>.
-        Watch them collaborate in the Activity feed and Graph view.
-      </div>
+      <div className="text-sm text-base-500 mb-6 max-w-md">{body}</div>
       <button
         onClick={onSpawn}
         className="px-4 py-2 rounded-md bg-(--color-accent-cyan)/20 hover:bg-(--color-accent-cyan)/30 border border-(--color-accent-cyan)/40 text-(--color-accent-cyan) text-sm transition"

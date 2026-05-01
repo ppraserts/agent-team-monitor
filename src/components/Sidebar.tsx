@@ -18,6 +18,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
+import { shortPath, workspaceNameFromPath } from "../lib/workspace";
 import type { ExternalSession, HistoryAgent } from "../types";
 
 interface Props {
@@ -203,6 +204,7 @@ export function Sidebar({
               id={a.snapshot.id}
               name={a.snapshot.spec.name}
               role={a.snapshot.spec.role}
+              cwd={a.snapshot.spec.cwd}
               status={a.snapshot.status}
               messages={a.snapshot.message_count}
               active={activeId === a.snapshot.id}
@@ -380,6 +382,7 @@ function Empty({ children }: { children: React.ReactNode }) {
 function AgentRow({
   name,
   role,
+  cwd,
   status,
   messages,
   active,
@@ -389,6 +392,7 @@ function AgentRow({
   id: string;
   name: string;
   role: string;
+  cwd: string;
   status: string;
   messages: number;
   active: boolean;
@@ -413,6 +417,9 @@ function AgentRow({
         <div className="flex-1 min-w-0">
           <div className="text-sm truncate font-medium">{name}</div>
           <div className="text-[10px] text-base-500 truncate">{role}</div>
+          <div className="text-[10px] text-(--color-accent-cyan) font-mono truncate" title={cwd}>
+            {workspaceNameFromPath(cwd)} · {shortPath(cwd)}
+          </div>
         </div>
         <span className="text-[10px] font-mono text-base-500">{messages}</span>
         <button

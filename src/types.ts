@@ -15,6 +15,7 @@ export interface AgentSpec {
   color?: string | null;
   vendor?: string | null;
   vendor_binary?: string | null;
+  workspace_id?: string | null;
   // Security toggles (defaults are safe — opt-in to relax).
   skip_permissions?: boolean;
   allow_mentions?: boolean;
@@ -112,6 +113,7 @@ export interface PtySnapshot {
   id: string;
   title: string;
   cwd: string;
+  workspace_id?: string | null;
   cols: number;
   rows: number;
 }
@@ -154,6 +156,34 @@ export interface GitStatus {
   changed_count: number;
   summary: string[];
   is_repo: boolean;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  root_path: string;
+  active_mission_id: string | null;
+  created_at: string;
+  last_opened_at: string;
+}
+
+export interface Mission {
+  id: string;
+  workspace_id: string;
+  title: string;
+  goal: string;
+  definition_of_done: string | null;
+  constraints: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceContext {
+  id: string;
+  name: string;
+  root: string;
+  active_mission_id?: string | null;
 }
 
 export interface RuntimeCheck {
@@ -278,6 +308,7 @@ export interface SkillEntry {
 
 export interface Board {
   id: number;
+  workspace_id: string | null;
   name: string;
   description: string | null;
   position: number;

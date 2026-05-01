@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Board {
     pub id: i64,
+    pub workspace_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub position: i64,
@@ -56,6 +57,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS boards (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id    TEXT,
             name            TEXT NOT NULL,
             description     TEXT,
             position        INTEGER NOT NULL DEFAULT 0,
@@ -90,6 +92,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_cards_col ON board_cards(column_id, position);
         "#,
     )?;
+    let _ = conn.execute("ALTER TABLE boards ADD COLUMN workspace_id TEXT", []);
     let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN description TEXT", []);
     let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN entry_criteria TEXT", []);
     let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN exit_criteria TEXT", []);
@@ -103,6 +106,54 @@ pub fn migrate(conn: &Connection) -> Result<()> {
 // ---------------- Boards ----------------
 
 pub fn list_boards(conn: &Connection) -> Result<Vec<Board>> {
+    list_boards_for_workspace(conn, None)
+}
+
+pub fn list_boards_for_workspace(conn: &Connection, workspace_id: Option<&str>) -> Result<Vec<Board>> {
+    let (sql, param): (&str, Option<&str>) = if workspace_id.is_some() {
+        (
+            "SELECT id, workspace_id, name, description, position, created_at, updated_at \
+             FROM boards WHERE workspace_id = ?1 ORDER BY position ASC, id ASC",
+            workspace_id,
+        )
+    } else {
+        (
+            "SELECT id, workspace_id, name, description, position, created_at, updated_at \
+             FROM boards ORDER BY position ASC, id ASC",
+            None,
+        )
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = if let Some(id) = param {
+        stmt.query_map(params![id], parse_board_row)?
+    } else {
+        stmt.query_map([], parse_board_row)?
+    };
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub fn create_board(conn: &Connection, workspace_id: Option<&str>, name: &str, description: Option<&str>) -> Result<Board> {
+    create_board_inner(conn, workspace_id, name, description)
+}
+
+fn parse_board_row(r: &rusqlite::Row) -> Result<Board, rusqlite::Error> {
+    Ok(Board {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        name: r.get(2)?,
+        description: r.get(3)?,
+        position: r.get(4)?,
+        created_at: parse_ts(&r.get::<_, String>(5)?),
+        updated_at: parse_ts(&r.get::<_, String>(6)?),
+    })
+}
+
+/*
+pub fn list_boards_old(conn: &Connection) -> Result<Vec<Board>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, description, position, created_at, updated_at \
          FROM boards ORDER BY position ASC, id ASC",
@@ -123,16 +174,17 @@ pub fn list_boards(conn: &Connection) -> Result<Vec<Board>> {
     }
     Ok(out)
 }
+*/
 
-pub fn create_board(conn: &Connection, name: &str, description: Option<&str>) -> Result<Board> {
+fn create_board_inner(conn: &Connection, workspace_id: Option<&str>, name: &str, description: Option<&str>) -> Result<Board> {
     let now = Utc::now().to_rfc3339();
     let pos: i64 = conn
         .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM boards", [], |r| r.get(0))
         .unwrap_or(0);
     conn.execute(
-        "INSERT INTO boards (name, description, position, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?4)",
-        params![name, description, pos, now],
+        "INSERT INTO boards (workspace_id, name, description, position, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+        params![workspace_id, name, description, pos, now],
     )?;
     let id = conn.last_insert_rowid();
 
@@ -212,18 +264,9 @@ struct DefaultColumnRule {
 
 pub fn get_board(conn: &Connection, id: i64) -> Result<Board> {
     let board = conn.query_row(
-        "SELECT id, name, description, position, created_at, updated_at FROM boards WHERE id = ?1",
+        "SELECT id, workspace_id, name, description, position, created_at, updated_at FROM boards WHERE id = ?1",
         params![id],
-        |r| {
-            Ok(Board {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                description: r.get(2)?,
-                position: r.get(3)?,
-                created_at: parse_ts(&r.get::<_, String>(4)?),
-                updated_at: parse_ts(&r.get::<_, String>(5)?),
-            })
-        },
+        parse_board_row,
     )?;
     Ok(board)
 }

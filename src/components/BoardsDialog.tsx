@@ -66,8 +66,14 @@ export function BoardsPanel({ onClose }: Props) {
   };
 
   const teamAgentNames = useStore(
-    useShallow((s) => Object.values(s.agents).map((a) => a.snapshot.spec.name)),
+    useShallow((s) => {
+      const active = s.activeWorkspace;
+      return Object.values(s.agents)
+        .filter((a) => !active || a.snapshot.spec.workspace_id === active.id || a.snapshot.spec.cwd === active.root)
+        .map((a) => a.snapshot.spec.name);
+    }),
   );
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
   /// agent_id → { cardId, cardTitle, boardId } — populated by Send.
   const agentCardLink = useStore((s) => s.agentCardLink);
   const boardRevision = useStore((s) => s.boardRevision);
@@ -83,9 +89,13 @@ export function BoardsPanel({ onClose }: Props) {
 
   const refreshBoards = async () => {
     try {
-      const list = await api.boardsList();
+      const list = await api.boardsList(activeWorkspace?.id ?? null);
       setBoards(list);
-      if (list.length > 0 && activeBoardId == null) {
+      if (list.length === 0) {
+        setActiveBoardId(null);
+        setColumns([]);
+        setCards([]);
+      } else if (activeBoardId == null || !list.some((b) => b.id === activeBoardId)) {
         setActiveBoardId(list[0].id);
       }
     } catch (e: any) { setError(String(e?.message ?? e)); }
@@ -105,7 +115,7 @@ export function BoardsPanel({ onClose }: Props) {
   useEffect(() => {
     refreshBoards();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [activeWorkspace?.id]);
 
   useEffect(() => {
     if (activeBoardId != null) refreshBoard(activeBoardId);
@@ -120,7 +130,7 @@ export function BoardsPanel({ onClose }: Props) {
     if (!name.trim()) return;
     setBusy(true);
     try {
-      const b = await api.boardsCreate(name.trim(), null);
+      const b = await api.boardsCreate(name.trim(), null, activeWorkspace?.id ?? null);
       await refreshBoards();
       setActiveBoardId(b.id);
       setCreatingBoard(false);
@@ -1260,7 +1270,17 @@ function buildBoardTaskMessage(card: BoardCard, columns: BoardColumn[]): string 
         "When you finish, report which lane this card should move to and why. Do not assume it moved automatically.",
       ].filter(Boolean).join("\n\n")
     : "";
-  return `[BOARD TASK] ${card.title}\n\n${card.description ?? ""}\n\n${workflow}`.trim();
+  return [
+    `[BOARD TASK #${card.id}] ${card.title}`,
+    card.description ?? "",
+    card.labels.length > 0 ? `[LABELS] ${card.labels.join(", ")}` : "",
+    workflow,
+    `[EXPECTED OUTPUT]
+- State what you changed or learned.
+- State whether this card is blocked, ready for review, or done.
+- If a lane move is needed, include the exact target lane name and reason.
+- If you need another agent, address them with @AgentName on a new line.`,
+  ].filter(Boolean).join("\n\n").trim();
 }
 
 function nonEmpty(value: string | null | undefined): value is string {

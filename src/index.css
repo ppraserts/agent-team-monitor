@@ -80,3 +80,11 @@ html, body, #root {
 .overflow-anchor-none {
   overflow-anchor: none;
 }
+
+.terminal-xterm-host .xterm {
+  height: 100%;
+}
+
+.terminal-xterm-host .xterm-viewport {
+  overflow-y: auto !important;
+}

@@ -7,6 +7,7 @@ mod pty;
 mod sessions;
 mod skills;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use serde::Serialize;
 
 use crate::agent::{AgentSnapshot, AgentSpec, ResumeOptions};
 use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
-use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, UsageStats};
+use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, Mission, UsageStats, Workspace};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
@@ -82,18 +83,32 @@ struct GitStatus {
     is_repo: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MissionSavePayload {
+    workspace_id: String,
+    id: Option<String>,
+    title: String,
+    goal: String,
+    definition_of_done: Option<String>,
+    constraints: Option<String>,
+    set_active: bool,
+}
+
 // ---------- Agent commands ----------
 
 #[tauri::command]
-async fn agent_spawn(spec: AgentSpec) -> Result<AgentSnapshot, String> {
+async fn agent_spawn(mut spec: AgentSpec) -> Result<AgentSnapshot, String> {
+    spec.cwd = normalize_spawn_cwd(&spec.cwd)?;
     agent_mgr().spawn(spec).await.map_err(format_error)
 }
 
 #[tauri::command]
 async fn agent_resume(
-    spec: AgentSpec,
+    mut spec: AgentSpec,
     session_id: Option<String>,
 ) -> Result<AgentSnapshot, String> {
+    spec.cwd = normalize_spawn_cwd(&spec.cwd)?;
     agent_mgr()
         .spawn_with_resume(spec, ResumeOptions { session_id })
         .await
@@ -121,7 +136,8 @@ fn agent_list() -> Vec<AgentSnapshot> {
 // ---------- PTY commands ----------
 
 #[tauri::command]
-fn pty_spawn(spec: PtySpec) -> Result<PtySnapshot, String> {
+fn pty_spawn(mut spec: PtySpec) -> Result<PtySnapshot, String> {
+    spec.cwd = normalize_spawn_cwd(&spec.cwd)?;
     pty_mgr().spawn(spec).map_err(format_error)
 }
 
@@ -300,6 +316,211 @@ fn workspace_dir() -> String {
         .unwrap_or(manifest_dir.as_path())
         .display()
         .to_string()
+}
+
+fn workspace_name_from_path(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn workspace_key(path: &str) -> String {
+    let normalized = normalize_windows_path_str(path).replace('/', r"\");
+    normalized.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+fn dedupe_workspaces(target_root: Option<&str>) -> Result<(), String> {
+    let mut buckets: HashMap<String, Vec<Workspace>> = HashMap::new();
+    for mut workspace in db().list_workspaces().map_err(|e| e.to_string())? {
+        workspace.root_path = normalize_windows_path_str(&workspace.root_path);
+        buckets
+            .entry(workspace_key(&workspace.root_path))
+            .or_default()
+            .push(workspace);
+    }
+
+    let target_key = target_root.map(workspace_key);
+    for (key, mut items) in buckets {
+        if target_key.as_ref().is_some_and(|target| target != &key) {
+            continue;
+        }
+        if items.len() < 2 {
+            continue;
+        }
+        items.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+        let keep = items.remove(0);
+        for duplicate in items {
+            let keep_id = keep.id.clone();
+            let duplicate_id = duplicate.id.clone();
+            let keep_root = keep.root_path.clone();
+            db().with_conn(|conn| {
+                conn.execute(
+                    "UPDATE agents SET workspace_id = ?1 WHERE workspace_id = ?2",
+                    rusqlite::params![keep_id, duplicate_id],
+                )?;
+                conn.execute(
+                    "UPDATE boards SET workspace_id = ?1 WHERE workspace_id = ?2",
+                    rusqlite::params![keep_id, duplicate_id],
+                )?;
+                conn.execute(
+                    "UPDATE missions SET workspace_id = ?1 WHERE workspace_id = ?2",
+                    rusqlite::params![keep_id, duplicate_id],
+                )?;
+                if keep.active_mission_id.is_none() && duplicate.active_mission_id.is_some() {
+                    conn.execute(
+                        "UPDATE workspaces SET active_mission_id = ?2 WHERE id = ?1",
+                        rusqlite::params![keep_id, duplicate.active_mission_id],
+                    )?;
+                }
+                conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![duplicate_id])?;
+                conn.execute(
+                    "UPDATE workspaces SET root_path = ?2 WHERE id = ?1",
+                    rusqlite::params![keep.id, keep_root],
+                )?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn workspaces_bootstrap(root_path: String) -> Result<Workspace, String> {
+    let root = canonical_existing_dir(&root_path).map_err(|e| e.to_string())?;
+    let name = workspace_name_from_path(&root);
+    let root_str = root.display().to_string();
+    dedupe_workspaces(Some(&root_str))?;
+    let workspace = db()
+        .ensure_workspace(&name, &root_str)
+        .map_err(|e| e.to_string())?;
+    let like = format!("{}%", root_str);
+    let _ = db().with_conn(|conn| {
+        conn.execute(
+            "UPDATE workspaces SET root_path = ?2 WHERE id = ?1",
+            rusqlite::params![workspace.id, root_str],
+        )?;
+        conn.execute(
+            "UPDATE boards SET workspace_id = ?1 WHERE workspace_id IS NULL",
+            rusqlite::params![workspace.id],
+        )?;
+        conn.execute(
+            "UPDATE agents SET workspace_id = ?1 WHERE workspace_id IS NULL AND cwd LIKE ?2",
+            rusqlite::params![workspace.id, like],
+        )?;
+        Ok(())
+    });
+    Ok(workspace)
+}
+
+#[tauri::command]
+fn workspaces_list() -> Result<Vec<Workspace>, String> {
+    dedupe_workspaces(None)?;
+    let items = db().list_workspaces().map_err(|e| e.to_string())?;
+    let normalized = items
+        .into_iter()
+        .map(|mut workspace| {
+            let fixed = normalize_windows_path_str(&workspace.root_path);
+            if fixed != workspace.root_path {
+                let id = workspace.id.clone();
+                let fixed_for_db = fixed.clone();
+                let _ = db().with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE workspaces SET root_path = ?2 WHERE id = ?1",
+                        rusqlite::params![id, fixed_for_db],
+                    )?;
+                    Ok(())
+                });
+                workspace.root_path = fixed;
+            }
+            workspace
+        })
+        .collect();
+    Ok(normalized)
+}
+
+#[tauri::command]
+fn workspaces_touch(id: String) -> Result<(), String> {
+    db().touch_workspace(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn workspaces_remove(id: String) -> Result<(), String> {
+    db().remove_workspace(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn pick_workspace_folder(initial_path: Option<String>) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let initial = initial_path.unwrap_or_else(workspace_dir);
+        let initial = initial.replace('\'', "''");
+        let script = format!(
+            r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select workspace folder'
+$initial = '{initial}'
+if ($initial -and (Test-Path -LiteralPath $initial)) {{
+  $dialog.SelectedPath = $initial
+}}
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+  Write-Output $dialog.SelectedPath
+}}
+"#
+        );
+        let out = Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-STA")
+            .arg("-Command")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("failed to open folder picker: {}", e))?;
+        if !out.status.success() {
+            return Err(format!(
+                "folder picker failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(path))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial_path;
+        Err("folder picker is currently implemented for Windows only".to_string())
+    }
+}
+
+#[tauri::command]
+fn missions_list(workspace_id: String) -> Result<Vec<Mission>, String> {
+    db().list_missions(&workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn missions_save(payload: MissionSavePayload) -> Result<Mission, String> {
+    db().save_mission(
+        &payload.workspace_id,
+        payload.id.as_deref(),
+        &payload.title,
+        &payload.goal,
+        payload.definition_of_done.as_deref(),
+        payload.constraints.as_deref(),
+        payload.set_active,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn missions_set_active(workspace_id: String, mission_id: Option<String>) -> Result<(), String> {
+    db().set_active_mission(&workspace_id, mission_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -579,16 +800,25 @@ fn find_binary(names: &[&str]) -> Option<String> {
 }
 
 fn validate_workspace_path(path: &str) -> anyhow::Result<PathBuf> {
-    let root = PathBuf::from(workspace_dir()).canonicalize()?;
     let candidate = PathBuf::from(path);
+    let base = PathBuf::from(workspace_dir());
     let full = if candidate.is_absolute() {
         candidate
     } else {
-        root.join(candidate)
+        base.join(candidate)
     }
     .canonicalize()?;
-    if !full.starts_with(&root) {
-        anyhow::bail!("path is outside workspace");
+    Ok(normalize_windows_path_buf(full))
+}
+
+fn normalize_spawn_cwd(path: &Path) -> Result<PathBuf, String> {
+    validate_workspace_path(&path.display().to_string()).map_err(|e| e.to_string())
+}
+
+fn canonical_existing_dir(path: &str) -> anyhow::Result<PathBuf> {
+    let full = validate_workspace_path(path)?;
+    if !full.is_dir() {
+        anyhow::bail!("workspace path is not a directory");
     }
     Ok(full)
 }
@@ -616,6 +846,23 @@ fn open_path(path: &Path) -> Result<(), String> {
             .map_err(|e| format!("failed to open path: {}", e))?;
     }
     Ok(())
+}
+
+fn normalize_windows_path_buf(path: PathBuf) -> PathBuf {
+    PathBuf::from(normalize_windows_path_str(&path.display().to_string()))
+}
+
+fn normalize_windows_path_str(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", rest);
+        }
+        if let Some(rest) = path.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
 }
 
 // ---------- ccusage: parse ~/.claude/projects/*.jsonl for global Claude usage ----------
@@ -793,13 +1040,17 @@ fn skills_default_body(kind: SkillKind, name: String) -> String {
 // ---------- Boards (Trello-style task boards) ----------
 
 #[tauri::command]
-fn boards_list() -> Result<Vec<Board>, String> {
-    db().with_conn(|c| boards::list_boards(c))
+fn boards_list(workspace_id: Option<String>) -> Result<Vec<Board>, String> {
+    db().with_conn(|c| boards::list_boards_for_workspace(c, workspace_id.as_deref()))
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-fn boards_create(name: String, description: Option<String>) -> Result<Board, String> {
-    db().with_conn(|c| boards::create_board(c, &name, description.as_deref()))
+fn boards_create(
+    workspace_id: Option<String>,
+    name: String,
+    description: Option<String>,
+) -> Result<Board, String> {
+    db().with_conn(|c| boards::create_board(c, workspace_id.as_deref(), &name, description.as_deref()))
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
@@ -926,6 +1177,14 @@ pub fn run() {
             runtime_diagnostics,
             home_dir,
             workspace_dir,
+            workspaces_bootstrap,
+            workspaces_list,
+            workspaces_touch,
+            workspaces_remove,
+            pick_workspace_folder,
+            missions_list,
+            missions_save,
+            missions_set_active,
             workspace_tools,
             workspace_open_tool,
             open_path_external,

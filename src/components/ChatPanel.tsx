@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
 import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
+import { isInsideWorkspace, shortPath, workspaceNameFromPath } from "../lib/workspace";
 import { findPreset, PRESETS, SAFETY_PROTOCOL } from "../lib/presets";
 import { compactAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
@@ -22,6 +23,7 @@ interface Props {
 
 export function ChatPanel({ agentId, onClose }: Props) {
   const record = useStore((s) => s.agents[agentId]);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
   const agentsById = useStore(
     useShallow((s) =>
       Object.fromEntries(
@@ -235,6 +237,9 @@ export function ChatPanel({ agentId, onClose }: Props) {
 
   if (!record) return null;
   const { snapshot } = record;
+  const agentWorkspaceName = workspaceNameFromPath(snapshot.spec.cwd);
+  const cwdMatchesActive =
+    !activeWorkspace || isInsideWorkspace(snapshot.spec.cwd, activeWorkspace.root);
 
   // Local-only message used to surface slash-command feedback in the chat
   // (success / failure / help). Doesn't go through the agent.
@@ -315,6 +320,7 @@ Available presets: ${presetList}`,
           color: preset.color,
           vendor: snapshot.spec.vendor ?? "claude",
           vendor_binary: snapshot.spec.vendor_binary ?? null,
+          workspace_id: snapshot.spec.workspace_id ?? activeWorkspace?.id ?? null,
           skip_permissions: true,
           allow_mentions: allowMentions,
           mention_allowlist: [],
@@ -456,9 +462,24 @@ Available presets: ${presetList}`,
             <span className="text-[10px] font-normal text-base-500">
               {snapshot.spec.role}
             </span>
+            <span
+              className={cn(
+                "text-[10px] font-mono px-1.5 py-0.5 rounded border",
+                cwdMatchesActive
+                  ? "text-(--color-accent-cyan) border-(--color-accent-cyan)/30 bg-(--color-accent-cyan)/10"
+                  : "text-(--color-accent-amber) border-(--color-accent-amber)/35 bg-(--color-accent-amber)/10",
+              )}
+              title={
+                cwdMatchesActive
+                  ? `Workspace: ${snapshot.spec.cwd}`
+                  : `Outside active workspace: ${snapshot.spec.cwd}`
+              }
+            >
+              {agentWorkspaceName}
+            </span>
           </div>
           <div className="text-[10px] text-base-500 truncate font-mono">
-            {snapshot.spec.cwd}
+            {shortPath(snapshot.spec.cwd)}
           </div>
         </div>
         <CardLinkBadge agentId={agentId} />

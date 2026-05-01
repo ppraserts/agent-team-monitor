@@ -7,6 +7,21 @@ import { X } from "lucide-react";
 import { api } from "../lib/api";
 import { useStore } from "../store";
 
+const TERMINAL_FONT_FAMILY = [
+  '"CaskaydiaCove Nerd Font"',
+  '"Cascadia Code NF"',
+  '"Cascadia Code PL"',
+  '"MesloLGS NF"',
+  '"FiraCode Nerd Font"',
+  '"JetBrainsMono Nerd Font"',
+  '"Symbols Nerd Font Mono"',
+  '"JetBrains Mono"',
+  '"Cascadia Code"',
+  "Consolas",
+  '"Segoe UI Symbol"',
+  "monospace",
+].join(", ");
+
 interface Props {
   ptyId: string;
   onClose?: () => void;
@@ -23,9 +38,10 @@ export function TerminalPanel({ ptyId, onClose, chrome = true }: Props) {
     if (!containerRef.current) return;
 
     const term = new Xterm({
-      fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 13,
       cursorBlink: true,
+      scrollOnUserInput: false,
       theme: {
         background: "#0c0d12",
         foreground: "#d8d8e0",
@@ -98,7 +114,7 @@ export function TerminalPanel({ ptyId, onClose, chrome = true }: Props) {
   if (!snap) return null;
 
   return (
-    <div className="flex flex-col h-full bg-base-950 border border-(--color-accent-violet)/30 rounded-lg overflow-hidden">
+    <div className="flex flex-col h-full min-h-0 bg-base-950 border border-(--color-accent-violet)/30 rounded-lg overflow-hidden">
       {chrome && (
         <div className="px-3 py-2 border-b border-base-800 flex items-center gap-2 bg-base-900/80">
           <div className="w-2 h-2 rounded-full bg-(--color-accent-violet)" />
@@ -113,7 +129,9 @@ export function TerminalPanel({ ptyId, onClose, chrome = true }: Props) {
           )}
         </div>
       )}
-      <div ref={containerRef} className="flex-1 p-2" />
+      <div className="flex-1 min-h-0 p-2 overflow-hidden">
+        <div ref={containerRef} className="h-full min-h-0 terminal-xterm-host" />
+      </div>
     </div>
   );
 }

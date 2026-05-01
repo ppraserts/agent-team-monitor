@@ -227,9 +227,53 @@ impl AgentManager {
         }
     }
 
-    fn current_board_context(&self) -> String {
+    fn current_workspace_line(&self, handle: &AgentHandle) -> String {
+        let cwd = handle.spec.cwd.display().to_string();
+        let project = handle
+            .spec
+            .cwd
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| cwd.clone());
+        let branch = std::process::Command::new("git")
+            .arg("branch")
+            .arg("--show-current")
+            .current_dir(&handle.spec.cwd)
+            .output()
+            .ok()
+            .and_then(|out| {
+                if !out.status.success() {
+                    return None;
+                }
+                let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if branch.is_empty() { None } else { Some(branch) }
+            })
+            .unwrap_or_else(|| "not-a-git-repo-or-detached".to_string());
+        format!(
+            "[WORKSPACE NOW: project={project}; root={cwd}; git_branch={branch}] (silent system note; do not acknowledge unless asked. Treat all file paths, commands, board tasks, and reviews as belonging to this workspace unless the user explicitly says otherwise.)",
+        )
+    }
+
+    fn current_mission_context(&self, workspace_id: Option<&str>) -> String {
+        let Some(workspace_id) = workspace_id else {
+            return String::new();
+        };
+        let Ok(Some(mission)) = self.db.active_mission_for_workspace(workspace_id) else {
+            return String::new();
+        };
+        format!(
+            "[ACTIVE MISSION]\nTitle: {}\nGoal: {}\nDefinition of done: {}\nConstraints: {}",
+            mission.title,
+            mission.goal,
+            mission.definition_of_done.as_deref().unwrap_or("-"),
+            mission.constraints.as_deref().unwrap_or("-"),
+        )
+    }
+
+    fn current_board_context(&self, workspace_id: Option<&str>) -> String {
         let Ok(lines) = self.db.with_conn(|conn| {
-            let board_list = boards::list_boards(conn)?;
+            let board_list = boards::list_boards_for_workspace(conn, workspace_id)?;
             let mut out = Vec::new();
             for board in board_list.iter().take(3) {
                 let cols = boards::list_columns(conn, board.id)?;
@@ -352,10 +396,16 @@ impl AgentManager {
         // knows who's on the team RIGHT NOW (covers teammates spawned after
         // this one — the system_prompt only had a snapshot at spawn time).
         let roster_header = self.current_roster_line(agent_id);
-        let board_context = self.current_board_context();
+        let workspace_header = self.current_workspace_line(&handle);
+        let mission_context = self.current_mission_context(handle.spec.workspace_id.as_deref());
+        let board_context = self.current_board_context(handle.spec.workspace_id.as_deref());
         let mut silent_headers = Vec::new();
+        silent_headers.push(workspace_header);
         if !roster_header.is_empty() {
             silent_headers.push(roster_header);
+        }
+        if !mission_context.is_empty() {
+            silent_headers.push(mission_context);
         }
         if !board_context.is_empty() {
             silent_headers.push(board_context);

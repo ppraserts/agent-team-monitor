@@ -14,6 +14,7 @@ import type {
   HistoryAgent,
   HistoryMessage,
   ImageAttachment,
+  Mission,
   PtySnapshot,
   RuntimeDiagnostics,
   SkillEntry,
@@ -21,6 +22,7 @@ import type {
   SkillScope,
   UsageStats,
   VendorInfo,
+  Workspace,
   WorkspaceTool,
 } from "../types";
 
@@ -54,6 +56,7 @@ export const api = {
   spawnPty: (spec: {
     title: string;
     cwd: string;
+    workspaceId?: string | null;
     program?: string;
     args?: string[];
     cols?: number;
@@ -63,6 +66,7 @@ export const api = {
       spec: {
         title: spec.title,
         cwd: spec.cwd,
+        workspaceId: spec.workspaceId ?? null,
         program: spec.program ?? null,
         args: spec.args ?? [],
         cols: spec.cols ?? 120,
@@ -87,6 +91,37 @@ export const api = {
   runtimeDiagnostics: () => invoke<RuntimeDiagnostics>("runtime_diagnostics"),
   homeDir: () => invoke<string | null>("home_dir"),
   workspaceDir: () => invoke<string>("workspace_dir"),
+  workspacesBootstrap: (rootPath: string) =>
+    invoke<Workspace>("workspaces_bootstrap", { rootPath }),
+  workspacesList: () => invoke<Workspace[]>("workspaces_list"),
+  workspacesTouch: (id: string) => invoke<void>("workspaces_touch", { id }),
+  workspacesRemove: (id: string) => invoke<void>("workspaces_remove", { id }),
+  pickWorkspaceFolder: (initialPath?: string | null) =>
+    invoke<string | null>("pick_workspace_folder", { initialPath: initialPath ?? null }),
+  missionsList: (workspaceId: string) =>
+    invoke<Mission[]>("missions_list", { workspaceId }),
+  missionsSave: (payload: {
+    workspaceId: string;
+    id?: string | null;
+    title: string;
+    goal: string;
+    definitionOfDone?: string | null;
+    constraints?: string | null;
+    setActive: boolean;
+  }) =>
+    invoke<Mission>("missions_save", {
+      payload: {
+        workspaceId: payload.workspaceId,
+        id: payload.id ?? null,
+        title: payload.title,
+        goal: payload.goal,
+        definitionOfDone: payload.definitionOfDone ?? null,
+        constraints: payload.constraints ?? null,
+        setActive: payload.setActive,
+      },
+    }),
+  missionsSetActive: (workspaceId: string, missionId: string | null) =>
+    invoke<void>("missions_set_active", { workspaceId, missionId }),
   workspaceTools: () => invoke<WorkspaceTool[]>("workspace_tools"),
   workspaceOpenTool: (toolId: string, cwd: string) =>
     invoke<void>("workspace_open_tool", { toolId, cwd }),
@@ -143,9 +178,14 @@ export const api = {
     invoke<string>("skills_default_body", { kind, name }),
 
   // Boards (Trello-style task boards)
-  boardsList: () => invoke<Board[]>("boards_list"),
-  boardsCreate: (name: string, description?: string | null) =>
-    invoke<Board>("boards_create", { name, description: description ?? null }),
+  boardsList: (workspaceId?: string | null) =>
+    invoke<Board[]>("boards_list", { workspaceId: workspaceId ?? null }),
+  boardsCreate: (name: string, description?: string | null, workspaceId?: string | null) =>
+    invoke<Board>("boards_create", {
+      workspaceId: workspaceId ?? null,
+      name,
+      description: description ?? null,
+    }),
   boardsUpdate: (id: number, name: string, description?: string | null) =>
     invoke<Board>("boards_update", { id, name, description: description ?? null }),
   boardsDelete: (id: number) => invoke<void>("boards_delete", { id }),

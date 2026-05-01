@@ -5,6 +5,7 @@ import {
 import { api } from "../lib/api";
 import { useStore } from "../store";
 import { cn } from "../lib/cn";
+import { shortPath } from "../lib/workspace";
 import type { CustomPreset, VendorInfo } from "../types";
 import { PRESETS, GROUP_ORDER, GROUP_COLOR, SAFETY_PROTOCOL } from "../lib/presets";
 
@@ -18,6 +19,7 @@ export function SpawnDialog({ open, onClose }: Props) {
   const upsertAgent = useStore((s) => s.upsertAgent);
   const upsertPty = useStore((s) => s.upsertPty);
   const homeDir = useStore((s) => s.homeDir);
+  const activeWorkspace = useStore((s) => s.activeWorkspace);
 
   const [tab, setTab] = useState<"agent" | "terminal">("agent");
   const [vendors, setVendors] = useState<VendorInfo[]>([]);
@@ -42,14 +44,14 @@ export function SpawnDialog({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     api.settingsGetAll().then((s) => {
-      if (s.default_cwd && !cwd) setCwd(s.default_cwd);
+      if (!cwd) setCwd(activeWorkspace?.root ?? s.default_cwd ?? "");
       if (s.default_skip_perms != null) setSkipPerms(s.default_skip_perms === "true");
       if (s.default_allow_mentions != null)
         setAllowMentions(s.default_allow_mentions !== "false");
       if (s.default_claude_bin != null) setVendorBinary(s.default_claude_bin);
     }).catch(() => {});
     api.presetsList().then(setCustomPresets).catch(() => {});
-  }, [open]);
+  }, [open, activeWorkspace?.root, cwd]);
 
   const refreshCustomPresets = () =>
     api.presetsList().then(setCustomPresets).catch(() => {});
@@ -79,8 +81,8 @@ export function SpawnDialog({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     api.listVendors().then(setVendors).catch(() => {});
-    if (!cwd && homeDir) setCwd(homeDir);
-  }, [open, homeDir, cwd]);
+    if (!cwd) setCwd(activeWorkspace?.root ?? homeDir ?? "");
+  }, [open, activeWorkspace?.root, homeDir, cwd]);
 
   const applyPreset = (p: (typeof PRESETS)[number]) => {
     setName(p.name);
@@ -116,6 +118,7 @@ export function SpawnDialog({ open, onClose }: Props) {
           color: null,
           vendor,
           vendor_binary: vendorBinary.trim() || null,
+          workspace_id: activeWorkspace?.id ?? null,
           skip_permissions: effectiveSkipPerms,
           allow_mentions: allowMentions,
           mention_allowlist: allowlist
@@ -128,6 +131,7 @@ export function SpawnDialog({ open, onClose }: Props) {
         const snap = await api.spawnPty({
           title: name.trim() || "terminal",
           cwd: cwd.trim(),
+          workspaceId: activeWorkspace?.id ?? null,
           program: vendor === "claude" ? undefined : vendor,
           args: [],
         });
@@ -305,6 +309,11 @@ export function SpawnDialog({ open, onClose }: Props) {
           )}
 
           <Field label="Working directory">
+            {activeWorkspace && (
+              <div className="mb-1 text-[10px] text-(--color-accent-cyan) font-mono truncate">
+                Active workspace: {activeWorkspace.name} · {shortPath(activeWorkspace.root)}
+              </div>
+            )}
             <input
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}

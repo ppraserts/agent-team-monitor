@@ -19,6 +19,8 @@ pub struct AgentSpec {
     pub vendor: Option<String>,
     #[serde(default)]
     pub vendor_binary: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 
     // ----- Security -----
     /// If true, pass `--dangerously-skip-permissions` to the CLI.

@@ -7,7 +7,28 @@ import type {
   PtySnapshot,
   VendorInfo,
   BoardCard,
+  Mission,
+  Workspace,
+  WorkspaceContext,
 } from "./types";
+
+function workspaceKey(path: string): string {
+  return path.replace(/^\\\\\?\\/, "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+
+function dedupeWorkspaces(workspaces: Workspace[]): Workspace[] {
+  const byPath = new Map<string, Workspace>();
+  for (const workspace of workspaces) {
+    const key = workspaceKey(workspace.root_path);
+    const existing = byPath.get(key);
+    if (!existing || new Date(workspace.last_opened_at).getTime() >= new Date(existing.last_opened_at).getTime()) {
+      byPath.set(key, workspace);
+    }
+  }
+  return Array.from(byPath.values()).sort((a, b) => (
+    new Date(b.last_opened_at).getTime() - new Date(a.last_opened_at).getTime()
+  ));
+}
 
 interface AgentRecord {
   snapshot: AgentSnapshot;
@@ -19,6 +40,9 @@ interface State {
   ptys: Record<string, PtySnapshot>;
   vendors: VendorInfo[];
   homeDir: string | null;
+  workspaces: Workspace[];
+  missions: Mission[];
+  activeWorkspace: WorkspaceContext | null;
 
   // UI state
   activeTileId: string | null; // agent or pty id
@@ -57,6 +81,11 @@ interface State {
   // selectors / mutations
   setVendors: (v: VendorInfo[]) => void;
   setHomeDir: (h: string | null) => void;
+  setWorkspaces: (workspaces: Workspace[]) => void;
+  upsertWorkspace: (workspace: Workspace) => void;
+  removeWorkspace: (id: string) => void;
+  setMissions: (missions: Mission[]) => void;
+  setActiveWorkspace: (workspace: WorkspaceContext | null) => void;
   upsertAgent: (snap: AgentSnapshot) => void;
   setStatus: (id: string, status: AgentStatus) => void;
   appendMessage: (id: string, msg: ChatMessage) => void;
@@ -105,6 +134,9 @@ export const useStore = create<State>((set) => ({
   ptys: {},
   vendors: [],
   homeDir: null,
+  workspaces: [],
+  missions: [],
+  activeWorkspace: null,
   activeTileId: null,
   layout: [],
   proposalDecisions: {},
@@ -117,6 +149,22 @@ export const useStore = create<State>((set) => ({
 
   setVendors: (v) => set({ vendors: v }),
   setHomeDir: (h) => set({ homeDir: h }),
+  setWorkspaces: (workspaces) => set({ workspaces: dedupeWorkspaces(workspaces) }),
+  upsertWorkspace: (workspace) =>
+    set((s) => ({
+      workspaces: dedupeWorkspaces(
+        s.workspaces.some((w) => w.id === workspace.id)
+          ? s.workspaces.map((w) => (w.id === workspace.id ? workspace : w))
+          : [...s.workspaces, workspace],
+      ),
+    })),
+  removeWorkspace: (id) =>
+    set((s) => ({
+      workspaces: s.workspaces.filter((w) => w.id !== id),
+      activeWorkspace: s.activeWorkspace?.id === id ? null : s.activeWorkspace,
+    })),
+  setMissions: (missions) => set({ missions }),
+  setActiveWorkspace: (workspace) => set({ activeWorkspace: workspace }),
 
   upsertAgent: (snap) =>
     set((s) => {

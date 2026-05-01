@@ -31,6 +31,8 @@ pub struct PtySpec {
     pub program: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     #[serde(default = "default_cols")]
     pub cols: u16,
     #[serde(default = "default_rows")]
@@ -45,6 +47,7 @@ pub struct PtySnapshot {
     pub id: String,
     pub title: String,
     pub cwd: PathBuf,
+    pub workspace_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -125,6 +128,7 @@ impl PtyManager {
             id: id.clone(),
             title: spec.title.clone(),
             cwd: spec.cwd.clone(),
+            workspace_id: spec.workspace_id.clone(),
             cols: spec.cols,
             rows: spec.rows,
         };
