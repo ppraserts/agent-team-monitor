@@ -42,6 +42,26 @@ export interface EditorTab {
   isDirty: boolean;
 }
 
+export interface EditorGroup {
+  id: string;
+  tabs: EditorTab[];
+  activePath: string | null;
+}
+
+export type SplitDirection = "horizontal" | "vertical";
+export type EditorDropZone = "center" | "left" | "right" | "top" | "bottom";
+
+/// Tree of editor groups. Leaves are concrete groups; branches split into
+/// children with relative sizes. The whole tree always has at least one leaf.
+export type EditorLayout =
+  | { kind: "leaf"; groupId: string }
+  | {
+      kind: "split";
+      direction: SplitDirection;
+      children: EditorLayout[];
+      sizes: number[];
+    };
+
 interface State {
   agents: Record<string, AgentRecord>;
   ptys: Record<string, PtySnapshot>;
@@ -51,9 +71,13 @@ interface State {
   missions: Mission[];
   activeWorkspace: WorkspaceContext | null;
 
-  editorTabs: EditorTab[];
-  activeEditorPath: string | null;
+  editorGroups: Record<string, EditorGroup>;
+  editorLayout: EditorLayout;
+  activeGroupId: string;
   editorVisible: boolean;
+  isDraggingEditorTab: boolean;
+  isDraggingEditorFile: boolean;
+  draggingEditorFilePath: string | null;
 
   // UI state
   activeTileId: string | null; // agent or pty id
@@ -139,12 +163,42 @@ interface State {
   carryChatViewCutoff: (fromAgentId: string, toAgentId: string) => void;
   clearActivityView: () => void;
 
-  openEditorTab: (path: string, content: string, mtimeMs: number) => void;
-  closeEditorTab: (path: string) => void;
-  setActiveEditorPath: (path: string | null) => void;
+  openEditorTab: (
+    path: string,
+    content: string,
+    mtimeMs: number,
+    targetGroupId?: string,
+  ) => void;
+  closeEditorTab: (groupId: string, path: string) => void;
+  reorderEditorTab: (groupId: string, path: string, targetPath: string, placeAfter: boolean) => void;
+  setActiveEditorTab: (groupId: string, path: string) => void;
+  setActiveGroup: (groupId: string) => void;
+  splitEditorGroup: (groupId: string, direction: SplitDirection) => void;
+  closeEditorGroup: (groupId: string) => void;
+  dropTabIntoGroup: (
+    fromGroupId: string,
+    path: string,
+    targetGroupId: string,
+    zone: EditorDropZone,
+  ) => void;
+  openEditorDrop: (
+    path: string,
+    content: string,
+    mtimeMs: number,
+    targetGroupId: string,
+    zone: EditorDropZone,
+  ) => void;
+  resizeEditorSplit: (path: number[], sizes: number[]) => void;
   setEditorVisible: (visible: boolean) => void;
-  markEditorDirty: (path: string, isDirty: boolean) => void;
-  recordEditorSave: (path: string, savedContent: string, mtimeMs: number) => void;
+  setDraggingEditorTab: (dragging: boolean) => void;
+  setDraggingEditorFile: (dragging: boolean, path?: string | null) => void;
+  markEditorDirty: (groupId: string, path: string, isDirty: boolean) => void;
+  recordEditorSave: (
+    groupId: string,
+    path: string,
+    savedContent: string,
+    mtimeMs: number,
+  ) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -155,9 +209,13 @@ export const useStore = create<State>((set) => ({
   workspaces: [],
   missions: [],
   activeWorkspace: null,
-  editorTabs: [],
-  activeEditorPath: null,
+  editorGroups: { g0: { id: "g0", tabs: [], activePath: null } },
+  editorLayout: { kind: "leaf", groupId: "g0" },
+  activeGroupId: "g0",
   editorVisible: false,
+  isDraggingEditorTab: false,
+  isDraggingEditorFile: false,
+  draggingEditorFilePath: null,
   activeTileId: null,
   layout: [],
   proposalDecisions: {},
@@ -286,11 +344,18 @@ export const useStore = create<State>((set) => ({
 
   setActive: (id) => set({ activeTileId: id }),
   toggleInLayout: (id) =>
-    set((s) => ({
-      layout: s.layout.includes(id) ? s.layout.filter((x) => x !== id) : [...s.layout, id],
-    })),
+    set((s) => {
+      const visible = s.layout.includes(id);
+      return {
+        layout: visible ? s.layout.filter((x) => x !== id) : [...s.layout, id],
+        activeTileId: visible && s.activeTileId === id ? null : s.activeTileId,
+      };
+    }),
   removeFromLayout: (id) =>
-    set((s) => ({ layout: s.layout.filter((x) => x !== id) })),
+    set((s) => ({
+      layout: s.layout.filter((x) => x !== id),
+      activeTileId: s.activeTileId === id ? null : s.activeTileId,
+    })),
 
   recordDecision: (key, decision) =>
     set((s) => ({
@@ -371,54 +436,459 @@ export const useStore = create<State>((set) => ({
 
   clearActivityView: () => set({ activityClearBefore: new Date().toISOString() }),
 
-  openEditorTab: (path, content, mtimeMs) =>
+  openEditorTab: (path, content, mtimeMs, targetGroupId) =>
     set((s) => {
-      const existingIdx = s.editorTabs.findIndex((t) => t.path === path);
-      if (existingIdx >= 0) {
-        // Already open — just focus it. Don't clobber unsaved edits.
-        return { activeEditorPath: path, editorVisible: true };
-      }
+      const groupId = targetGroupId ?? s.activeGroupId;
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      const existing = group.tabs.find((t) => t.path === path);
+      const nextTabs = existing
+        ? group.tabs
+        : [
+            ...group.tabs,
+            { path, savedContent: content, mtimeMs, isDirty: false },
+          ];
       return {
-        editorTabs: [
-          ...s.editorTabs,
-          { path, savedContent: content, mtimeMs, isDirty: false },
-        ],
-        activeEditorPath: path,
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: { ...group, tabs: nextTabs, activePath: path },
+        },
+        activeGroupId: groupId,
         editorVisible: true,
       };
     }),
 
-  closeEditorTab: (path) =>
+  closeEditorTab: (groupId, path) =>
     set((s) => {
-      const idx = s.editorTabs.findIndex((t) => t.path === path);
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      const idx = group.tabs.findIndex((t) => t.path === path);
       if (idx < 0) return {};
-      const nextTabs = s.editorTabs.filter((t) => t.path !== path);
-      let activeEditorPath = s.activeEditorPath;
-      if (s.activeEditorPath === path) {
+      const nextTabs = group.tabs.filter((t) => t.path !== path);
+      let activePath = group.activePath;
+      if (group.activePath === path) {
         const fallback = nextTabs[Math.min(idx, nextTabs.length - 1)] ?? null;
-        activeEditorPath = fallback ? fallback.path : null;
+        activePath = fallback ? fallback.path : null;
       }
+      // Empty group + not the only group → collapse it.
+      if (nextTabs.length === 0 && countLeaves(s.editorLayout) > 1) {
+        const layout = removeGroupFromLayout(s.editorLayout, groupId);
+        const { [groupId]: _, ...restGroups } = s.editorGroups;
+        const fallbackId = firstLeafId(layout) ?? "g0";
+        return {
+          editorGroups: restGroups,
+          editorLayout: layout,
+          activeGroupId:
+            s.activeGroupId === groupId ? fallbackId : s.activeGroupId,
+        };
+      }
+      const visible = anyTabsRemain(s.editorGroups, groupId, nextTabs.length)
+        ? s.editorVisible
+        : false;
       return {
-        editorTabs: nextTabs,
-        activeEditorPath,
-        editorVisible: nextTabs.length > 0 ? s.editorVisible : false,
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: { ...group, tabs: nextTabs, activePath },
+        },
+        editorVisible: visible,
       };
     }),
 
-  setActiveEditorPath: (path) => set({ activeEditorPath: path }),
+  reorderEditorTab: (groupId, path, targetPath, placeAfter) =>
+    set((s) => {
+      if (path === targetPath) return {};
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      const fromIndex = group.tabs.findIndex((t) => t.path === path);
+      const targetIndex = group.tabs.findIndex((t) => t.path === targetPath);
+      if (fromIndex < 0 || targetIndex < 0) return {};
+      const tabs = [...group.tabs];
+      const [tab] = tabs.splice(fromIndex, 1);
+      let insertIndex = tabs.findIndex((t) => t.path === targetPath);
+      if (insertIndex < 0) insertIndex = tabs.length;
+      if (placeAfter) insertIndex += 1;
+      tabs.splice(insertIndex, 0, tab);
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: { ...group, tabs, activePath: path },
+        },
+        activeGroupId: groupId,
+      };
+    }),
+
+  setActiveEditorTab: (groupId, path) =>
+    set((s) => {
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: { ...group, activePath: path },
+        },
+        activeGroupId: groupId,
+      };
+    }),
+
+  setActiveGroup: (groupId) =>
+    set((s) =>
+      s.editorGroups[groupId] ? { activeGroupId: groupId } : {},
+    ),
+
+  splitEditorGroup: (groupId, direction) =>
+    set((s) => {
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      const newId = `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      // The new sibling starts focused on the same active tab so the user can
+      // immediately swap one side to a different file for comparison.
+      const cloneTabs: EditorTab[] = group.tabs.map((t) => ({ ...t }));
+      const layout = splitLeafInLayout(s.editorLayout, groupId, newId, direction);
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [newId]: { id: newId, tabs: cloneTabs, activePath: group.activePath },
+        },
+        editorLayout: layout,
+        activeGroupId: newId,
+        editorVisible: true,
+      };
+    }),
+
+  closeEditorGroup: (groupId) =>
+    set((s) => {
+      if (!s.editorGroups[groupId]) return {};
+      if (countLeaves(s.editorLayout) <= 1) {
+        // Last group standing — empty it instead of removing.
+        return {
+          editorGroups: {
+            ...s.editorGroups,
+            [groupId]: { id: groupId, tabs: [], activePath: null },
+          },
+          editorVisible: false,
+        };
+      }
+      const layout = removeGroupFromLayout(s.editorLayout, groupId);
+      const { [groupId]: _, ...rest } = s.editorGroups;
+      const fallbackId = firstLeafId(layout) ?? "g0";
+      return {
+        editorGroups: rest,
+        editorLayout: layout,
+        activeGroupId:
+          s.activeGroupId === groupId ? fallbackId : s.activeGroupId,
+      };
+    }),
+
+  dropTabIntoGroup: (fromGroupId, path, targetGroupId, zone) =>
+    set((s) => {
+      const fromGroup = s.editorGroups[fromGroupId];
+      const targetGroup = s.editorGroups[targetGroupId];
+      if (!fromGroup || !targetGroup) return {};
+      const tab = fromGroup.tabs.find((t) => t.path === path);
+      if (!tab) return {};
+
+      // Center drop = move tab into target group (or just refocus if same).
+      if (zone === "center") {
+        if (fromGroupId === targetGroupId) {
+          return {
+            editorGroups: {
+              ...s.editorGroups,
+              [targetGroupId]: { ...targetGroup, activePath: path },
+            },
+            activeGroupId: targetGroupId,
+          };
+        }
+        const alreadyInTarget = targetGroup.tabs.some((t) => t.path === path);
+        const targetTabs = alreadyInTarget
+          ? targetGroup.tabs
+          : [...targetGroup.tabs, { ...tab }];
+        const fromTabs = fromGroup.tabs.filter((t) => t.path !== path);
+
+        if (fromTabs.length === 0 && countLeaves(s.editorLayout) > 1) {
+          const layout = removeGroupFromLayout(s.editorLayout, fromGroupId);
+          const { [fromGroupId]: _, ...rest } = s.editorGroups;
+          return {
+            editorGroups: {
+              ...rest,
+              [targetGroupId]: { ...targetGroup, tabs: targetTabs, activePath: path },
+            },
+            editorLayout: layout,
+            activeGroupId: targetGroupId,
+          };
+        }
+        const fromActive =
+          fromGroup.activePath === path
+            ? fromTabs[0]?.path ?? null
+            : fromGroup.activePath;
+        return {
+          editorGroups: {
+            ...s.editorGroups,
+            [fromGroupId]: { ...fromGroup, tabs: fromTabs, activePath: fromActive },
+            [targetGroupId]: { ...targetGroup, tabs: targetTabs, activePath: path },
+          },
+          activeGroupId: targetGroupId,
+        };
+      }
+
+      // Edge drop = split target with a new sibling, place tab there.
+      const direction: SplitDirection =
+        zone === "left" || zone === "right" ? "horizontal" : "vertical";
+      const placeBefore = zone === "left" || zone === "top";
+      const newId = `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      const layoutAfterSplit = splitLeafWithOrder(
+        s.editorLayout,
+        targetGroupId,
+        newId,
+        direction,
+        placeBefore,
+      );
+      const newGroup: EditorGroup = {
+        id: newId,
+        tabs: [{ ...tab }],
+        activePath: path,
+      };
+      const splittingWithinSameGroup = fromGroupId === targetGroupId;
+
+      if (splittingWithinSameGroup) {
+        return {
+          editorGroups: {
+            ...s.editorGroups,
+            [newId]: newGroup,
+          },
+          editorLayout: layoutAfterSplit,
+          activeGroupId: newId,
+        };
+      }
+
+      const fromTabs = fromGroup.tabs.filter((t) => t.path !== path);
+      const sourceEmptied = fromTabs.length === 0;
+
+      if (sourceEmptied && countLeaves(layoutAfterSplit) > 1) {
+        const layoutFinal = removeGroupFromLayout(layoutAfterSplit, fromGroupId);
+        const { [fromGroupId]: _, ...rest } = s.editorGroups;
+        return {
+          editorGroups: { ...rest, [newId]: newGroup },
+          editorLayout: layoutFinal,
+          activeGroupId: newId,
+        };
+      }
+      const fromActive =
+        fromGroup.activePath === path
+          ? fromTabs[0]?.path ?? null
+          : fromGroup.activePath;
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [fromGroupId]: { ...fromGroup, tabs: fromTabs, activePath: fromActive },
+          [newId]: newGroup,
+        },
+        editorLayout: layoutAfterSplit,
+        activeGroupId: newId,
+      };
+    }),
+
+  openEditorDrop: (path, content, mtimeMs, targetGroupId, zone) =>
+    set((s) => {
+      const targetGroup = s.editorGroups[targetGroupId];
+      if (!targetGroup) return {};
+
+      if (zone === "center") {
+        const existing = targetGroup.tabs.find((t) => t.path === path);
+        const tabs = existing
+          ? targetGroup.tabs
+          : [...targetGroup.tabs, { path, savedContent: content, mtimeMs, isDirty: false }];
+        return {
+          editorGroups: {
+            ...s.editorGroups,
+            [targetGroupId]: { ...targetGroup, tabs, activePath: path },
+          },
+          activeGroupId: targetGroupId,
+          editorVisible: true,
+        };
+      }
+
+      const direction: SplitDirection =
+        zone === "left" || zone === "right" ? "horizontal" : "vertical";
+      const placeBefore = zone === "left" || zone === "top";
+      const newId = `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      const layout = splitLeafWithOrder(
+        s.editorLayout,
+        targetGroupId,
+        newId,
+        direction,
+        placeBefore,
+      );
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [newId]: {
+            id: newId,
+            tabs: [{ path, savedContent: content, mtimeMs, isDirty: false }],
+            activePath: path,
+          },
+        },
+        editorLayout: layout,
+        activeGroupId: newId,
+        editorVisible: true,
+      };
+    }),
+
+  resizeEditorSplit: (path, sizes) =>
+    set((s) => ({
+      editorLayout: setSizesAtPath(s.editorLayout, path, sizes),
+    })),
+
   setEditorVisible: (visible) => set({ editorVisible: visible }),
+  setDraggingEditorTab: (dragging) => set({ isDraggingEditorTab: dragging }),
+  setDraggingEditorFile: (dragging, path) =>
+    set({
+      isDraggingEditorFile: dragging,
+      draggingEditorFilePath: dragging ? (path ?? null) : null,
+    }),
 
-  markEditorDirty: (path, isDirty) =>
-    set((s) => ({
-      editorTabs: s.editorTabs.map((t) =>
-        t.path === path ? { ...t, isDirty } : t,
-      ),
-    })),
+  markEditorDirty: (groupId, path, isDirty) =>
+    set((s) => {
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: {
+            ...group,
+            tabs: group.tabs.map((t) =>
+              t.path === path ? { ...t, isDirty } : t,
+            ),
+          },
+        },
+      };
+    }),
 
-  recordEditorSave: (path, savedContent, mtimeMs) =>
-    set((s) => ({
-      editorTabs: s.editorTabs.map((t) =>
-        t.path === path ? { ...t, savedContent, mtimeMs, isDirty: false } : t,
-      ),
-    })),
+  recordEditorSave: (groupId, path, savedContent, mtimeMs) =>
+    set((s) => {
+      const group = s.editorGroups[groupId];
+      if (!group) return {};
+      return {
+        editorGroups: {
+          ...s.editorGroups,
+          [groupId]: {
+            ...group,
+            tabs: group.tabs.map((t) =>
+              t.path === path ? { ...t, savedContent, mtimeMs, isDirty: false } : t,
+            ),
+          },
+        },
+      };
+    }),
 }));
+
+// ---------- Layout helpers ----------
+
+function countLeaves(layout: EditorLayout): number {
+  if (layout.kind === "leaf") return 1;
+  return layout.children.reduce((acc, c) => acc + countLeaves(c), 0);
+}
+
+function firstLeafId(layout: EditorLayout): string | null {
+  if (layout.kind === "leaf") return layout.groupId;
+  for (const child of layout.children) {
+    const id = firstLeafId(child);
+    if (id) return id;
+  }
+  return null;
+}
+
+function splitLeafInLayout(
+  layout: EditorLayout,
+  targetId: string,
+  newId: string,
+  direction: SplitDirection,
+): EditorLayout {
+  return splitLeafWithOrder(layout, targetId, newId, direction, false);
+}
+
+function splitLeafWithOrder(
+  layout: EditorLayout,
+  targetId: string,
+  newId: string,
+  direction: SplitDirection,
+  placeBefore: boolean,
+): EditorLayout {
+  if (layout.kind === "leaf") {
+    if (layout.groupId !== targetId) return layout;
+    const children: EditorLayout[] = placeBefore
+      ? [
+          { kind: "leaf", groupId: newId },
+          { kind: "leaf", groupId: targetId },
+        ]
+      : [
+          { kind: "leaf", groupId: targetId },
+          { kind: "leaf", groupId: newId },
+        ];
+    return {
+      kind: "split",
+      direction,
+      children,
+      sizes: [50, 50],
+    };
+  }
+  let changed = false;
+  const children = layout.children.map((c) => {
+    const next = splitLeafWithOrder(c, targetId, newId, direction, placeBefore);
+    if (next !== c) changed = true;
+    return next;
+  });
+  if (!changed) return layout;
+  return { ...layout, children };
+}
+
+function removeGroupFromLayout(
+  layout: EditorLayout,
+  groupId: string,
+): EditorLayout {
+  if (layout.kind === "leaf") return layout;
+  const filtered = layout.children
+    .map((c) => removeGroupFromLayout(c, groupId))
+    .filter((c) => !(c.kind === "leaf" && c.groupId === groupId));
+  if (filtered.length === 0) {
+    // Collapsed branch — caller should have prevented this, but stay safe.
+    return layout.children[0];
+  }
+  if (filtered.length === 1) return filtered[0];
+  // Renormalize sizes to sum to 100 across the surviving children.
+  const each = 100 / filtered.length;
+  return {
+    ...layout,
+    children: filtered,
+    sizes: filtered.map(() => each),
+  };
+}
+
+function setSizesAtPath(
+  layout: EditorLayout,
+  path: number[],
+  sizes: number[],
+): EditorLayout {
+  if (path.length === 0) {
+    if (layout.kind !== "split") return layout;
+    return { ...layout, sizes };
+  }
+  if (layout.kind !== "split") return layout;
+  const [head, ...rest] = path;
+  const children = layout.children.map((c, i) =>
+    i === head ? setSizesAtPath(c, rest, sizes) : c,
+  );
+  return { ...layout, children };
+}
+
+function anyTabsRemain(
+  groups: Record<string, EditorGroup>,
+  changedGroupId: string,
+  newCountForChanged: number,
+): boolean {
+  if (newCountForChanged > 0) return true;
+  for (const [id, g] of Object.entries(groups)) {
+    if (id === changedGroupId) continue;
+    if (g.tabs.length > 0) return true;
+  }
+  return false;
+}

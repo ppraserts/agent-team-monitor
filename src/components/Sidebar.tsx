@@ -12,6 +12,8 @@ import {
   KanbanSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  Trash2,
+  X,
 } from "lucide-react";
 import { Logo } from "./Logo";
 import { useShallow } from "zustand/react/shallow";
@@ -43,7 +45,10 @@ export function Sidebar({
   const agents = useStore(useShallow((s) => Object.values(s.agents)));
   const ptys = useStore(useShallow((s) => Object.values(s.ptys)));
   const activeId = useStore((s) => s.activeTileId);
+  const layout = useStore((s) => s.layout);
   const setActive = useStore((s) => s.setActive);
+  const toggleInLayout = useStore((s) => s.toggleInLayout);
+  const removeFromLayout = useStore((s) => s.removeFromLayout);
   const removeAgent = useStore((s) => s.removeAgent);
   const removePty = useStore((s) => s.removePty);
 
@@ -80,6 +85,10 @@ export function Sidebar({
     0,
   );
   const totalTurns = agents.reduce((s, a) => s + a.snapshot.usage.turns, 0);
+  const showTile = (id: string) => {
+    if (!layout.includes(id)) toggleInLayout(id);
+    setActive(id);
+  };
 
   if (collapsed) {
     return (
@@ -99,7 +108,7 @@ export function Sidebar({
           {agents.map((a) => (
             <button
               key={a.snapshot.id}
-              onClick={() => setActive(a.snapshot.id)}
+              onClick={() => showTile(a.snapshot.id)}
               className={cn(
                 "h-9 w-9 rounded-md border flex items-center justify-center mx-auto transition relative",
                 activeId === a.snapshot.id
@@ -120,7 +129,7 @@ export function Sidebar({
           {ptys.map((p) => (
             <button
               key={p.id}
-              onClick={() => setActive(p.id)}
+              onClick={() => showTile(p.id)}
               className={cn(
                 "h-9 w-9 rounded-md border flex items-center justify-center mx-auto transition",
                 activeId === p.id
@@ -208,8 +217,10 @@ export function Sidebar({
               status={a.snapshot.status}
               messages={a.snapshot.message_count}
               active={activeId === a.snapshot.id}
-              onClick={() => setActive(a.snapshot.id)}
-              onClose={async () => {
+              visible={layout.includes(a.snapshot.id)}
+              onClick={() => showTile(a.snapshot.id)}
+              onHide={() => removeFromLayout(a.snapshot.id)}
+              onKill={async () => {
                 await api.killAgent(a.snapshot.id).catch(() => {});
                 removeAgent(a.snapshot.id);
               }}
@@ -226,8 +237,10 @@ export function Sidebar({
               title={p.title}
               cwd={p.cwd}
               active={activeId === p.id}
-              onClick={() => setActive(p.id)}
-              onClose={async () => {
+              visible={layout.includes(p.id)}
+              onClick={() => showTile(p.id)}
+              onHide={() => removeFromLayout(p.id)}
+              onKill={async () => {
                 await api.killPty(p.id).catch(() => {});
                 removePty(p.id);
               }}
@@ -386,8 +399,10 @@ function AgentRow({
   status,
   messages,
   active,
+  visible,
   onClick,
-  onClose,
+  onHide,
+  onKill,
 }: {
   id: string;
   name: string;
@@ -396,8 +411,10 @@ function AgentRow({
   status: string;
   messages: number;
   active: boolean;
+  visible: boolean;
   onClick: () => void;
-  onClose: () => void;
+  onHide: () => void;
+  onKill: () => void;
 }) {
   return (
     <div
@@ -407,7 +424,9 @@ function AgentRow({
         active
           ? "bg-(--color-accent-cyan)/10 border-(--color-accent-cyan)/40"
           : "bg-base-900/50 border-transparent hover:bg-base-800/60",
+        !visible && "opacity-60",
       )}
+      title={visible ? "Focus agent pane" : "Show agent pane"}
     >
       <div className="flex items-center gap-2">
         <span
@@ -421,17 +440,34 @@ function AgentRow({
             {workspaceNameFromPath(cwd)} · {shortPath(cwd)}
           </div>
         </div>
+        {!visible && <span className="text-[9px] text-base-500 uppercase">hidden</span>}
         <span className="text-[10px] font-mono text-base-500">{messages}</span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onClose();
-          }}
-          className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red) text-xs transition"
-          title="Kill"
-        >
-          ×
-        </button>
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+          {visible && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onHide();
+              }}
+              className="text-base-500 hover:text-base-200 transition"
+              title="Hide pane"
+              aria-label="Hide pane"
+            >
+              <X size={12} />
+            </button>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onKill();
+            }}
+            className="text-base-500 hover:text-(--color-accent-red) transition"
+            title="Kill agent"
+            aria-label="Kill agent"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -441,15 +477,19 @@ function PtyRow({
   title,
   cwd,
   active,
+  visible,
   onClick,
-  onClose,
+  onHide,
+  onKill,
 }: {
   id: string;
   title: string;
   cwd: string;
   active: boolean;
+  visible: boolean;
   onClick: () => void;
-  onClose: () => void;
+  onHide: () => void;
+  onKill: () => void;
 }) {
   return (
     <div
@@ -459,7 +499,9 @@ function PtyRow({
         active
           ? "bg-(--color-accent-violet)/10 border-(--color-accent-violet)/40"
           : "bg-base-900/50 border-transparent hover:bg-base-800/60",
+        !visible && "opacity-60",
       )}
+      title={visible ? "Focus terminal pane" : "Show terminal pane"}
     >
       <div className="flex items-center gap-2">
         <Terminal size={12} className="text-(--color-accent-violet) shrink-0" />
@@ -467,15 +509,33 @@ function PtyRow({
           <div className="text-sm truncate font-medium">{title}</div>
           <div className="text-[10px] text-base-500 truncate" title={cwd}>{cwd}</div>
         </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onClose();
-          }}
-          className="opacity-0 group-hover:opacity-100 text-base-500 hover:text-(--color-accent-red) text-xs transition"
-        >
-          ×
-        </button>
+        {!visible && <span className="text-[9px] text-base-500 uppercase">hidden</span>}
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+          {visible && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onHide();
+              }}
+              className="text-base-500 hover:text-base-200 transition"
+              title="Hide pane"
+              aria-label="Hide pane"
+            >
+              <X size={12} />
+            </button>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onKill();
+            }}
+            className="text-base-500 hover:text-(--color-accent-red) transition"
+            title="Kill terminal"
+            aria-label="Kill terminal"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
       </div>
     </div>
   );

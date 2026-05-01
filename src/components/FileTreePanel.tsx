@@ -220,11 +220,14 @@ function EntryRow({
   onError: (err: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const suppressClickRef = useRef(false);
   const isRenaming = ctx.renamingPath === entry.path;
   const closeEditorTab = useStore((s) => s.closeEditorTab);
-  const editorTabs = useStore((s) => s.editorTabs);
+  const editorGroups = useStore((s) => s.editorGroups);
+  const setDraggingEditorFile = useStore((s) => s.setDraggingEditorFile);
 
   const click = async () => {
+    if (suppressClickRef.current) return;
     if (entry.is_dir) {
       setOpen((v) => !v);
       return;
@@ -245,14 +248,18 @@ function EntryRow({
     if (!ok) return;
     try {
       await api.fsDelete(entry.path);
-      // Close any editor tabs whose path lives inside the deleted entry.
-      for (const tab of editorTabs) {
-        if (
-          tab.path === entry.path ||
-          tab.path.startsWith(entry.path.replace(/[\\/]+$/, "") + "/") ||
-          tab.path.startsWith(entry.path.replace(/[\\/]+$/, "") + "\\")
-        ) {
-          closeEditorTab(tab.path);
+      // Close any editor tabs whose path lives inside the deleted entry,
+      // across every editor group.
+      const root = entry.path.replace(/[\\/]+$/, "");
+      for (const group of Object.values(editorGroups)) {
+        for (const tab of group.tabs) {
+          if (
+            tab.path === entry.path ||
+            tab.path.startsWith(root + "/") ||
+            tab.path.startsWith(root + "\\")
+          ) {
+            closeEditorTab(group.id, tab.path);
+          }
         }
       }
       ctx.refreshAll();
@@ -294,6 +301,36 @@ function EntryRow({
         />
       ) : (
         <div
+          onMouseDown={(e) => {
+            if (entry.is_dir || e.button !== 0) return;
+            const startX = e.clientX;
+            const startY = e.clientY;
+            let started = false;
+            const onMove = (move: MouseEvent) => {
+              const dx = move.clientX - startX;
+              const dy = move.clientY - startY;
+              if (!started && Math.hypot(dx, dy) < 4) return;
+              started = true;
+              suppressClickRef.current = true;
+              document.body.style.cursor = "copy";
+              document.body.style.userSelect = "none";
+              setDraggingEditorFile(true, entry.path);
+              move.preventDefault();
+            };
+            const onUp = () => {
+              window.removeEventListener("mousemove", onMove, true);
+              window.removeEventListener("mouseup", onUp, true);
+              document.body.style.cursor = "";
+              document.body.style.userSelect = "";
+              if (!started) return;
+              window.setTimeout(() => {
+                suppressClickRef.current = false;
+                setDraggingEditorFile(false, null);
+              }, 0);
+            };
+            window.addEventListener("mousemove", onMove, true);
+            window.addEventListener("mouseup", onUp, true);
+          }}
           className="group flex items-center w-full h-7 rounded-md hover:bg-base-800/70 transition"
           style={{ paddingLeft: 6 + depth * 14, paddingRight: 4 }}
         >

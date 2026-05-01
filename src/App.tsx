@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   LayoutGrid,
@@ -20,13 +20,6 @@ import { ChatPanel } from "./components/ChatPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
-import { BoardsPanel } from "./components/BoardsDialog";
-import { FileTreePanel } from "./components/FileTreePanel";
-import { SourceControlPanel } from "./components/SourceControlPanel";
-import { EditorTile } from "./components/EditorTile";
-import { TeamFeed } from "./components/TeamFeed";
-import { AgentGraph } from "./components/AgentGraph";
-import { UsagePanel } from "./components/UsagePanel";
 import { WorkspaceToolbar } from "./components/WorkspaceToolbar";
 import { useStore } from "./store";
 import { api } from "./lib/api";
@@ -41,6 +34,27 @@ import type { AgentEvent, HistoryAgent, Workspace, WorkspaceTool } from "./types
 import { cn } from "./lib/cn";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
+const EditorTile = lazy(() =>
+  import("./components/EditorTile").then((module) => ({ default: module.EditorTile })),
+);
+const BoardsPanel = lazy(() =>
+  import("./components/BoardsDialog").then((module) => ({ default: module.BoardsPanel })),
+);
+const FileTreePanel = lazy(() =>
+  import("./components/FileTreePanel").then((module) => ({ default: module.FileTreePanel })),
+);
+const SourceControlPanel = lazy(() =>
+  import("./components/SourceControlPanel").then((module) => ({ default: module.SourceControlPanel })),
+);
+const TeamFeed = lazy(() =>
+  import("./components/TeamFeed").then((module) => ({ default: module.TeamFeed })),
+);
+const AgentGraph = lazy(() =>
+  import("./components/AgentGraph").then((module) => ({ default: module.AgentGraph })),
+);
+const UsagePanel = lazy(() =>
+  import("./components/UsagePanel").then((module) => ({ default: module.UsagePanel })),
+);
 
 type RightPaneMode = "feed" | "graph" | "usage" | "files" | "scm" | "off";
 
@@ -106,9 +120,12 @@ export default function App() {
   const agents = useStore((s) => s.agents);
   const ptys = useStore((s) => s.ptys);
   const setActive = useStore((s) => s.setActive);
+  const removeFromLayout = useStore((s) => s.removeFromLayout);
   const activeTileId = useStore((s) => s.activeTileId);
   const editorVisible = useStore((s) => s.editorVisible);
-  const editorTabsCount = useStore((s) => s.editorTabs.length);
+  const editorTabsCount = useStore((s) =>
+    Object.values(s.editorGroups).reduce((acc, g) => acc + g.tabs.length, 0),
+  );
   const setEditorVisible = useStore((s) => s.setEditorVisible);
 
   useEffect(() => {
@@ -511,12 +528,14 @@ export default function App() {
                         className="min-h-0 min-w-0"
                         onClick={() => setActive(id)}
                       >
-                        <ChatPanel agentId={id} />
+                        <ChatPanel agentId={id} onClose={() => removeFromLayout(id)} />
                       </div>
                     ))}
                     {editorVisible && editorTabsCount > 0 && (
                       <div key="__editor__" className="min-h-0 min-w-0 relative">
-                        <EditorTile onClose={() => setEditorVisible(false)} />
+                        <Suspense fallback={<EditorLoading />}>
+                          <EditorTile onClose={() => setEditorVisible(false)} />
+                        </Suspense>
                       </div>
                     )}
                   </div>
@@ -537,7 +556,9 @@ export default function App() {
                     className="min-h-0"
                     style={{ flex: `0 0 ${boardSplit * 100}%` }}
                   >
-                    <BoardsPanel onClose={() => setBoardsOpen(false)} />
+                    <Suspense fallback={<PanelLoading />}>
+                      <BoardsPanel onClose={() => setBoardsOpen(false)} />
+                    </Suspense>
                   </div>
                 </>
               )}
@@ -571,15 +592,17 @@ export default function App() {
 
           {rightPane !== "off" && !rightCollapsed && (
             <div className="w-96 shrink-0 border-l border-base-800 p-3 bg-base-950/40">
-              {rightPane === "feed" && <TeamFeed />}
-              {rightPane === "graph" && <AgentGraph mentionPulse={mentionPulse} />}
-              {rightPane === "usage" && <UsagePanel />}
-              {rightPane === "files" && (
-                <FileTreePanel root={workspaceDir} onClose={() => setRightPane("off")} />
-              )}
-              {rightPane === "scm" && (
-                <SourceControlPanel cwd={workspaceDir} onClose={() => setRightPane("off")} />
-              )}
+              <Suspense fallback={<PanelLoading />}>
+                {rightPane === "feed" && <TeamFeed />}
+                {rightPane === "graph" && <AgentGraph mentionPulse={mentionPulse} />}
+                {rightPane === "usage" && <UsagePanel />}
+                {rightPane === "files" && (
+                  <FileTreePanel root={workspaceDir} onClose={() => setRightPane("off")} />
+                )}
+                {rightPane === "scm" && (
+                  <SourceControlPanel cwd={workspaceDir} onClose={() => setRightPane("off")} />
+                )}
+              </Suspense>
             </div>
           )}
         </div>
@@ -833,6 +856,22 @@ function EmptyState({ onSpawn }: { onSpawn: () => void }) {
       >
         + Spawn your first agent
       </button>
+    </div>
+  );
+}
+
+function EditorLoading() {
+  return (
+    <div className="h-full w-full rounded-lg border border-(--color-accent-amber)/25 bg-base-950 flex items-center justify-center text-xs text-base-500">
+      Loading editor...
+    </div>
+  );
+}
+
+function PanelLoading() {
+  return (
+    <div className="h-full min-h-32 rounded-md border border-base-800 bg-base-950/60 flex items-center justify-center text-xs text-base-500">
+      Loading...
     </div>
   );
 }
