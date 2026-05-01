@@ -9,7 +9,12 @@ import type {
   CcusageReport,
   CustomPreset,
   ExternalSession,
+  FileContent,
   FsEntry,
+  GitBranch,
+  GitChanges,
+  GitCommit,
+  GitStash,
   GitStatus,
   HistoryAgent,
   HistoryMessage,
@@ -127,6 +132,14 @@ export const api = {
     invoke<void>("workspace_open_tool", { toolId, cwd }),
   openPathExternal: (path: string) => invoke<void>("open_path_external", { path }),
   fsListDir: (path: string) => invoke<FsEntry[]>("fs_list_dir", { path }),
+  fsReadFile: (path: string) => invoke<FileContent>("fs_read_file", { path }),
+  fsWriteFile: (path: string, content: string) =>
+    invoke<number>("fs_write_file", { path, content }),
+  fsCreateFile: (path: string) => invoke<string>("fs_create_file", { path }),
+  fsCreateDir: (path: string) => invoke<string>("fs_create_dir", { path }),
+  fsRename: (from: string, to: string) =>
+    invoke<string>("fs_rename", { from, to }),
+  fsDelete: (path: string) => invoke<void>("fs_delete", { path }),
   savePastedImage: (payload: {
     cwd: string;
     dataB64: string;
@@ -134,6 +147,57 @@ export const api = {
     name?: string | null;
   }) => invoke<ImageAttachment>("save_pasted_image", { payload }),
   gitStatus: (cwd: string) => invoke<GitStatus>("git_status", { cwd }),
+
+  // Source Control
+  gitChanges: (cwd: string) => invoke<GitChanges>("git_changes", { cwd }),
+  gitDiff: (
+    cwd: string,
+    payload: { path: string; staged?: boolean; untracked?: boolean },
+  ) =>
+    invoke<string>("git_diff", {
+      cwd,
+      payload: {
+        path: payload.path,
+        staged: payload.staged ?? false,
+        untracked: payload.untracked ?? false,
+      },
+    }),
+  gitStage: (cwd: string, paths: string[]) =>
+    invoke<void>("git_stage", { cwd, paths }),
+  gitStageAll: (cwd: string) => invoke<void>("git_stage_all", { cwd }),
+  gitUnstage: (cwd: string, paths: string[]) =>
+    invoke<void>("git_unstage", { cwd, paths }),
+  gitUnstageAll: (cwd: string) => invoke<void>("git_unstage_all", { cwd }),
+  gitDiscard: (cwd: string, paths: string[], untracked: boolean) =>
+    invoke<void>("git_discard", { cwd, paths, untracked }),
+  gitCommit: (
+    cwd: string,
+    payload: { message: string; amend?: boolean; signOff?: boolean },
+  ) =>
+    invoke<string>("git_commit", {
+      cwd,
+      payload: {
+        message: payload.message,
+        amend: payload.amend ?? false,
+        signOff: payload.signOff ?? false,
+      },
+    }),
+  gitPush: (cwd: string, setUpstream: boolean) =>
+    invoke<string>("git_push", { cwd, setUpstream }),
+  gitPull: (cwd: string) => invoke<string>("git_pull", { cwd }),
+  gitFetch: (cwd: string) => invoke<string>("git_fetch", { cwd }),
+  gitBranches: (cwd: string) => invoke<GitBranch[]>("git_branches", { cwd }),
+  gitCheckout: (cwd: string, branch: string, create: boolean) =>
+    invoke<void>("git_checkout", { cwd, branch, create }),
+  gitLog: (cwd: string, limit?: number) =>
+    invoke<GitCommit[]>("git_log", { cwd, limit: limit ?? null }),
+  gitStashList: (cwd: string) => invoke<GitStash[]>("git_stash_list", { cwd }),
+  gitStashSave: (cwd: string, message: string, includeUntracked: boolean) =>
+    invoke<void>("git_stash_save", { cwd, message, includeUntracked }),
+  gitStashPop: (cwd: string, index: number) =>
+    invoke<void>("git_stash_pop", { cwd, index }),
+  gitStashDrop: (cwd: string, index: number) =>
+    invoke<void>("git_stash_drop", { cwd, index }),
 
   // History / persistence
   historyListAgents: (limit?: number) =>

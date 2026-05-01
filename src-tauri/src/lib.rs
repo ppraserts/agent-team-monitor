@@ -2,6 +2,7 @@ mod adapter;
 mod agent;
 mod boards;
 mod db;
+mod git;
 mod manager;
 mod pty;
 mod sessions;
@@ -19,6 +20,9 @@ use serde::Serialize;
 use crate::agent::{AgentSnapshot, AgentSpec, ResumeOptions};
 use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
 use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, Mission, UsageStats, Workspace};
+use crate::git::{
+    GitBranch, GitChanges, GitCommit, GitCommitPayload, GitDiffRequest, GitStash,
+};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
@@ -56,6 +60,15 @@ struct FsEntry {
     name: String,
     path: String,
     is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FileContent {
+    path: String,
+    content: String,
+    is_binary: bool,
+    size_bytes: u64,
+    mtime_ms: i64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -657,6 +670,128 @@ fn fs_list_dir(path: String) -> Result<Vec<FsEntry>, String> {
 }
 
 #[tauri::command]
+fn fs_read_file(path: String) -> Result<FileContent, String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("read failed: {}", e))?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("stat failed: {}", e))?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Detect binary by scanning for NUL bytes in the first 8KB. Real editors do
+    // similar heuristics; if it looks binary, refuse rather than mangle UTF-8.
+    let head = &bytes[..bytes.len().min(8192)];
+    let is_binary = head.contains(&0u8);
+    if is_binary {
+        return Ok(FileContent {
+            path: path.display().to_string(),
+            content: String::new(),
+            is_binary: true,
+            size_bytes: bytes.len() as u64,
+            mtime_ms,
+        });
+    }
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(FileContent {
+        path: path.display().to_string(),
+        content,
+        is_binary: false,
+        size_bytes: bytes.len() as u64,
+        mtime_ms,
+    })
+}
+
+#[tauri::command]
+fn fs_create_file(path: String) -> Result<String, String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    if path.exists() {
+        return Err(format!("file already exists: {}", path.display()));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
+        }
+    }
+    std::fs::write(&path, b"").map_err(|e| format!("create failed: {}", e))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn fs_create_dir(path: String) -> Result<String, String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    if path.exists() {
+        return Err(format!("directory already exists: {}", path.display()));
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("mkdir failed: {}", e))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn fs_rename(from: String, to: String) -> Result<String, String> {
+    let from = validate_workspace_path(&from).map_err(|e| e.to_string())?;
+    // `to` may not yet exist — resolve its parent for sandbox check, then join.
+    let to_buf = std::path::PathBuf::from(&to);
+    let to_abs = if to_buf.is_absolute() {
+        to_buf
+    } else {
+        from.parent()
+            .map(|p| p.join(&to_buf))
+            .unwrap_or(to_buf)
+    };
+    if let Some(parent) = to_abs.parent() {
+        // Validates that the destination is inside the workspace.
+        validate_workspace_path(&parent.display().to_string())
+            .map_err(|e| e.to_string())?;
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
+        }
+    }
+    if to_abs.exists() {
+        return Err(format!("destination exists: {}", to_abs.display()));
+    }
+    std::fs::rename(&from, &to_abs).map_err(|e| format!("rename failed: {}", e))?;
+    Ok(to_abs.display().to_string())
+}
+
+#[tauri::command]
+fn fs_delete(path: String) -> Result<(), String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    let workspace_root = std::path::PathBuf::from(workspace_dir());
+    // Defense in depth: never delete the workspace root or anything outside it.
+    if path == workspace_root {
+        return Err("refusing to delete the workspace root".to_string());
+    }
+    let meta = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("stat failed: {}", e))?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&path).map_err(|e| format!("delete failed: {}", e))?;
+    } else {
+        std::fs::remove_file(&path).map_err(|e| format!("delete failed: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn fs_write_file(path: String, content: String) -> Result<i64, String> {
+    let path = validate_workspace_path(&path).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
+        }
+    }
+    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("write failed: {}", e))?;
+    let mtime_ms = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(mtime_ms)
+}
+
+#[tauri::command]
 fn save_pasted_image(payload: PastedImagePayload) -> Result<ImageAttachment, String> {
     let cwd = validate_workspace_path(&payload.cwd).map_err(|e| e.to_string())?;
     let ext = match payload.mime.as_str() {
@@ -739,6 +874,116 @@ fn git_status(cwd: String) -> Result<GitStatus, String> {
         summary,
         is_repo: true,
     })
+}
+
+// ---------- Source Control commands ----------
+
+#[tauri::command]
+fn git_changes(cwd: String) -> Result<GitChanges, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::changes(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_diff(cwd: String, payload: GitDiffRequest) -> Result<String, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::diff(&cwd, &payload).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stage(&cwd, &paths).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stage_all(cwd: String) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stage_all(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::unstage(&cwd, &paths).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_unstage_all(cwd: String) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::unstage_all(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_discard(cwd: String, paths: Vec<String>, untracked: bool) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::discard(&cwd, &paths, untracked).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_commit(cwd: String, payload: GitCommitPayload) -> Result<String, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::commit(&cwd, &payload).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_push(cwd: String, set_upstream: bool) -> Result<String, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::push(&cwd, set_upstream).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_pull(cwd: String) -> Result<String, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::pull(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_fetch(cwd: String) -> Result<String, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::fetch(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_branches(cwd: String) -> Result<Vec<GitBranch>, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::branches(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_checkout(cwd: String, branch: String, create: bool) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::checkout(&cwd, &branch, create).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_log(cwd: String, limit: Option<usize>) -> Result<Vec<GitCommit>, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::log(&cwd, limit.unwrap_or(50)).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stash_list(cwd: String) -> Result<Vec<GitStash>, String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stash_list(&cwd).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stash_save(cwd: String, message: String, include_untracked: bool) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stash_save(&cwd, &message, include_untracked).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stash_pop(cwd: String, index: usize) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stash_pop(&cwd, index).map_err(format_error)
+}
+
+#[tauri::command]
+fn git_stash_drop(cwd: String, index: usize) -> Result<(), String> {
+    let cwd = validate_workspace_path(&cwd).map_err(|e| e.to_string())?;
+    git::stash_drop(&cwd, index).map_err(format_error)
 }
 
 fn sanitize_file_stem(name: &str) -> String {
@@ -1189,8 +1434,32 @@ pub fn run() {
             workspace_open_tool,
             open_path_external,
             fs_list_dir,
+            fs_read_file,
+            fs_write_file,
+            fs_create_file,
+            fs_create_dir,
+            fs_rename,
+            fs_delete,
             save_pasted_image,
             git_status,
+            git_changes,
+            git_diff,
+            git_stage,
+            git_stage_all,
+            git_unstage,
+            git_unstage_all,
+            git_discard,
+            git_commit,
+            git_push,
+            git_pull,
+            git_fetch,
+            git_branches,
+            git_checkout,
+            git_log,
+            git_stash_list,
+            git_stash_save,
+            git_stash_pop,
+            git_stash_drop,
             ccusage_report,
             skills_list,
             skills_save,

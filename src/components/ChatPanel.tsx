@@ -10,6 +10,7 @@ import { compactAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
 import { AgentSettingsDialog } from "./AgentSettingsDialog";
+import { Markdown } from "./Markdown";
 import type { ChatMessage, ImageAttachment } from "../types";
 
 /// Default model context window for the bar denominator. Sonnet/Opus are 200k,
@@ -840,7 +841,7 @@ const MessageBubble = memo(function MessageBubble({
       {displayContent.length > 0 && (
         <div
           className={cn(
-            "max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words transition",
+            "max-w-[85%] rounded-lg px-3 py-2 text-sm break-words transition",
             isUser
               ? isRouted
                 ? cn(
@@ -854,7 +855,7 @@ const MessageBubble = memo(function MessageBubble({
                 ),
           )}
         >
-          {displayContent}
+          <Markdown content={displayContent} />
         </div>
       )}
       {/* Approval cards (one per proposal in this message) */}

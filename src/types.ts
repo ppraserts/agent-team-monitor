@@ -151,11 +151,65 @@ export interface ImageAttachment {
   mime: string;
 }
 
+export interface FileContent {
+  path: string;
+  content: string;
+  is_binary: boolean;
+  size_bytes: number;
+  mtime_ms: number;
+}
+
 export interface GitStatus {
   branch: string | null;
   changed_count: number;
   summary: string[];
   is_repo: boolean;
+}
+
+export interface GitFileChange {
+  path: string;
+  old_path: string | null;
+  xy: string;
+  index_status: string;
+  work_status: string;
+  staged: boolean;
+  unstaged: boolean;
+  is_untracked: boolean;
+  is_conflicted: boolean;
+  is_ignored: boolean;
+}
+
+export interface GitChanges {
+  is_repo: boolean;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  has_remote: boolean;
+  files: GitFileChange[];
+}
+
+export interface GitBranch {
+  name: string;
+  is_current: boolean;
+  is_remote: boolean;
+  upstream: string | null;
+}
+
+export interface GitCommit {
+  hash: string;
+  short_hash: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+}
+
+export interface GitStash {
+  index: number;
+  name: string;
+  message: string;
+  branch: string | null;
 }
 
 export interface Workspace {

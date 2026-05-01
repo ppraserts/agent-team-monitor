@@ -35,6 +35,13 @@ interface AgentRecord {
   messages: ChatMessage[];
 }
 
+export interface EditorTab {
+  path: string;
+  savedContent: string;
+  mtimeMs: number;
+  isDirty: boolean;
+}
+
 interface State {
   agents: Record<string, AgentRecord>;
   ptys: Record<string, PtySnapshot>;
@@ -43,6 +50,10 @@ interface State {
   workspaces: Workspace[];
   missions: Mission[];
   activeWorkspace: WorkspaceContext | null;
+
+  editorTabs: EditorTab[];
+  activeEditorPath: string | null;
+  editorVisible: boolean;
 
   // UI state
   activeTileId: string | null; // agent or pty id
@@ -127,6 +138,13 @@ interface State {
   clearChatView: (agentId: string) => void;
   carryChatViewCutoff: (fromAgentId: string, toAgentId: string) => void;
   clearActivityView: () => void;
+
+  openEditorTab: (path: string, content: string, mtimeMs: number) => void;
+  closeEditorTab: (path: string) => void;
+  setActiveEditorPath: (path: string | null) => void;
+  setEditorVisible: (visible: boolean) => void;
+  markEditorDirty: (path: string, isDirty: boolean) => void;
+  recordEditorSave: (path: string, savedContent: string, mtimeMs: number) => void;
 }
 
 export const useStore = create<State>((set) => ({
@@ -137,6 +155,9 @@ export const useStore = create<State>((set) => ({
   workspaces: [],
   missions: [],
   activeWorkspace: null,
+  editorTabs: [],
+  activeEditorPath: null,
+  editorVisible: false,
   activeTileId: null,
   layout: [],
   proposalDecisions: {},
@@ -349,4 +370,55 @@ export const useStore = create<State>((set) => ({
     }),
 
   clearActivityView: () => set({ activityClearBefore: new Date().toISOString() }),
+
+  openEditorTab: (path, content, mtimeMs) =>
+    set((s) => {
+      const existingIdx = s.editorTabs.findIndex((t) => t.path === path);
+      if (existingIdx >= 0) {
+        // Already open — just focus it. Don't clobber unsaved edits.
+        return { activeEditorPath: path, editorVisible: true };
+      }
+      return {
+        editorTabs: [
+          ...s.editorTabs,
+          { path, savedContent: content, mtimeMs, isDirty: false },
+        ],
+        activeEditorPath: path,
+        editorVisible: true,
+      };
+    }),
+
+  closeEditorTab: (path) =>
+    set((s) => {
+      const idx = s.editorTabs.findIndex((t) => t.path === path);
+      if (idx < 0) return {};
+      const nextTabs = s.editorTabs.filter((t) => t.path !== path);
+      let activeEditorPath = s.activeEditorPath;
+      if (s.activeEditorPath === path) {
+        const fallback = nextTabs[Math.min(idx, nextTabs.length - 1)] ?? null;
+        activeEditorPath = fallback ? fallback.path : null;
+      }
+      return {
+        editorTabs: nextTabs,
+        activeEditorPath,
+        editorVisible: nextTabs.length > 0 ? s.editorVisible : false,
+      };
+    }),
+
+  setActiveEditorPath: (path) => set({ activeEditorPath: path }),
+  setEditorVisible: (visible) => set({ editorVisible: visible }),
+
+  markEditorDirty: (path, isDirty) =>
+    set((s) => ({
+      editorTabs: s.editorTabs.map((t) =>
+        t.path === path ? { ...t, isDirty } : t,
+      ),
+    })),
+
+  recordEditorSave: (path, savedContent, mtimeMs) =>
+    set((s) => ({
+      editorTabs: s.editorTabs.map((t) =>
+        t.path === path ? { ...t, savedContent, mtimeMs, isDirty: false } : t,
+      ),
+    })),
 }));

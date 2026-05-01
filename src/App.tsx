@@ -5,7 +5,9 @@ import {
   Network,
   Eye,
   Zap,
+  Code2,
   Files,
+  GitBranch,
   Plus,
   X,
   PanelBottomClose,
@@ -20,6 +22,8 @@ import { SpawnDialog } from "./components/SpawnDialog";
 import { SettingsDialog, applyTheme } from "./components/SettingsDialog";
 import { BoardsPanel } from "./components/BoardsDialog";
 import { FileTreePanel } from "./components/FileTreePanel";
+import { SourceControlPanel } from "./components/SourceControlPanel";
+import { EditorTile } from "./components/EditorTile";
 import { TeamFeed } from "./components/TeamFeed";
 import { AgentGraph } from "./components/AgentGraph";
 import { UsagePanel } from "./components/UsagePanel";
@@ -38,7 +42,7 @@ import { cn } from "./lib/cn";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-type RightPaneMode = "feed" | "graph" | "usage" | "files" | "off";
+type RightPaneMode = "feed" | "graph" | "usage" | "files" | "scm" | "off";
 
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -103,6 +107,9 @@ export default function App() {
   const ptys = useStore((s) => s.ptys);
   const setActive = useStore((s) => s.setActive);
   const activeTileId = useStore((s) => s.activeTileId);
+  const editorVisible = useStore((s) => s.editorVisible);
+  const editorTabsCount = useStore((s) => s.editorTabs.length);
+  const setEditorVisible = useStore((s) => s.setEditorVisible);
 
   useEffect(() => {
     api.homeDir().then(setHomeDir).catch(() => {});
@@ -427,6 +434,16 @@ export default function App() {
           </div>
           <div className="ml-auto shrink-0 flex items-center gap-1">
             <ToolbarBtn
+              active={editorVisible && editorTabsCount > 0}
+              onClick={() => setEditorVisible(!(editorVisible && editorTabsCount > 0))}
+              icon={<Code2 size={13} />}
+              label={
+                editorTabsCount > 0
+                  ? `Editor (${editorTabsCount})`
+                  : "Editor"
+              }
+            />
+            <ToolbarBtn
               active={rightPane === "feed"}
               onClick={() => setRightPane(rightPane === "feed" ? "off" : "feed")}
               icon={<Eye size={13} />}
@@ -443,6 +460,12 @@ export default function App() {
               onClick={() => setRightPane(rightPane === "usage" ? "off" : "usage")}
               icon={<Zap size={13} />}
               label="Usage"
+            />
+            <ToolbarBtn
+              active={rightPane === "scm"}
+              onClick={() => setRightPane(rightPane === "scm" ? "off" : "scm")}
+              icon={<GitBranch size={13} />}
+              label="Source Control"
             />
             <ToolbarBtn
               active={rightPane === "files"}
@@ -470,13 +493,15 @@ export default function App() {
                   flex: boardsOpen ? `0 0 ${(1 - boardSplit) * 100}%` : "1 1 100%",
                 }}
               >
-                {tiles.length === 0 ? (
+                {tiles.length === 0 && !(editorVisible && editorTabsCount > 0) ? (
                   <EmptyState onSpawn={() => setSpawnOpen(true)} />
                 ) : (
                   <div
                     className="grid gap-3 h-full"
                     style={{
-                      gridTemplateColumns: `repeat(${gridCols(tiles.length)}, minmax(0, 1fr))`,
+                      gridTemplateColumns: `repeat(${gridCols(
+                        tiles.length + (editorVisible && editorTabsCount > 0 ? 1 : 0),
+                      )}, minmax(0, 1fr))`,
                       gridAutoRows: "minmax(0, 1fr)",
                     }}
                   >
@@ -489,6 +514,11 @@ export default function App() {
                         <ChatPanel agentId={id} />
                       </div>
                     ))}
+                    {editorVisible && editorTabsCount > 0 && (
+                      <div key="__editor__" className="min-h-0 min-w-0 relative">
+                        <EditorTile onClose={() => setEditorVisible(false)} />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -546,6 +576,9 @@ export default function App() {
               {rightPane === "usage" && <UsagePanel />}
               {rightPane === "files" && (
                 <FileTreePanel root={workspaceDir} onClose={() => setRightPane("off")} />
+              )}
+              {rightPane === "scm" && (
+                <SourceControlPanel cwd={workspaceDir} onClose={() => setRightPane("off")} />
               )}
             </div>
           )}
@@ -726,6 +759,12 @@ function RightRail({
         onClick={() => onMode("usage")}
         icon={<Zap size={15} />}
         label="Usage"
+      />
+      <RailButton
+        active={mode === "scm"}
+        onClick={() => onMode("scm")}
+        icon={<GitBranch size={15} />}
+        label="Source Control"
       />
       <RailButton
         active={mode === "files"}

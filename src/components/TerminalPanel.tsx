@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 import { X } from "lucide-react";
 import { api } from "../lib/api";
@@ -59,6 +61,12 @@ export function TerminalPanel({ ptyId, onClose, chrome = true }: Props) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    term.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        event.preventDefault();
+        openUrl(uri).catch((err) => console.error("openUrl failed", err));
+      }),
+    );
     term.open(containerRef.current);
     fit.fit();
     termRef.current = term;
