@@ -13,6 +13,8 @@ pub struct AgentSpec {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
     pub color: Option<String>,
     /// Vendor key — selects the AgentAdapter (default: "claude").
     #[serde(default)]

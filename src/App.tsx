@@ -320,18 +320,34 @@ export default function App() {
             appendToolUse(ev.agent_id, `board.${ev.action}`, ev.card, ev.ts);
           }
           break;
-        case "exit":
+        case "exit": {
           appendProcessActivity(
             ev.agent_id,
             ev.agent_name,
             ev.code,
             ev.stderr_tail,
           );
+          // Surface the exit reason in the agent's own chat panel so the user
+          // doesn't have to dig into the Team Activity feed to see why the
+          // process died. Include stderr tail when available — that's where
+          // the Claude CLI prints API errors, parser failures, etc.
+          const codeLabel = ev.code == null ? "unknown" : String(ev.code);
+          const stderrText = ev.stderr_tail.filter((l) => l.trim()).join("\n");
+          const exitContent = stderrText
+            ? `[process exited code=${codeLabel}]\n${stderrText}`
+            : `[process exited code=${codeLabel}]`;
+          appendMessage(ev.agent_id, {
+            id: crypto.randomUUID(),
+            role: "system" as any,
+            content: exitContent,
+            ts: new Date().toISOString(),
+          });
           // Drop any board-card linkage so the card stops showing
           // "working" once the underlying process is gone.
           useStore.getState().unlinkAgent(ev.agent_id);
           removeAgent(ev.agent_id);
           break;
+        }
         case "stderr":
           appendMessage(ev.agent_id, {
             id: crypto.randomUUID(),
@@ -867,7 +883,7 @@ function EmptyState({ onSpawn }: { onSpawn: () => void }) {
     </>
   ) : (
     <>
-      Spawn multiple Claude agents that can work in parallel and talk to each
+      Spawn multiple CLI agents that can work in parallel and talk to each
       other using <span className="text-(--color-accent-cyan)">@AgentName</span>.
       Watch them collaborate in the Activity feed and Graph view.
     </>

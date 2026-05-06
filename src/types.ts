@@ -12,6 +12,7 @@ export interface AgentSpec {
   cwd: string;
   system_prompt?: string | null;
   model?: string | null;
+  reasoning_effort?: string | null;
   color?: string | null;
   vendor?: string | null;
   vendor_binary?: string | null;

@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Send, X, Wrench, ArrowRight, AtSign, Archive, BookOpen, ShieldCheck, ShieldX, Settings as Cog, KanbanSquare, Image as ImageIcon } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../store";
@@ -6,7 +6,7 @@ import { api } from "../lib/api";
 import { cn, statusColor, fmtCost, fmtNumber } from "../lib/cn";
 import { isInsideWorkspace, shortPath, workspaceNameFromPath } from "../lib/workspace";
 import { findPreset, PRESETS, SAFETY_PROTOCOL } from "../lib/presets";
-import { compactAgent } from "../lib/compact";
+import { compactAgent, restartAgent } from "../lib/compact";
 import { parseProposals, splitProposalBody, stripProposals, decisionKey } from "../lib/proposals";
 import { SkillsDialog } from "./SkillsDialog";
 import { AgentSettingsDialog } from "./AgentSettingsDialog";
@@ -38,6 +38,13 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const [dragOverComposer, setDragOverComposer] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Re-renders the "last activity Xs ago" badge in the header. We don't need
+  // millisecond accuracy — every 5s is fine and avoids spamming React.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => clearInterval(t);
+  }, []);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const forceStickRef = useRef(false);
@@ -72,6 +79,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
           { label: "/kill", insert: "/kill ", hint: "terminate agent by name", mode: "replace-all" },
           { label: "/clear", insert: "/clear", hint: "clear this chat view only", mode: "replace-all" },
           { label: "/compact", insert: "/compact", hint: "summarize + restart this agent (frees context)", mode: "replace-all" },
+          { label: "/restart", insert: "/restart", hint: "kill + respawn this agent with same spec (unstick it)", mode: "replace-all" },
           { label: "/list", insert: "/list", hint: "show current team", mode: "replace-all" },
           { label: "/help", insert: "/help", hint: "show all commands", mode: "replace-all" },
         ];
@@ -243,6 +251,21 @@ export function ChatPanel({ agentId, onClose }: Props) {
   const cwdMatchesActive =
     !activeWorkspace || isInsideWorkspace(snapshot.spec.cwd, activeWorkspace.root);
 
+  const idleSeconds = Math.max(
+    0,
+    Math.floor((Date.now() - +new Date(snapshot.last_activity)) / 1000),
+  );
+  const active = snapshot.status === "thinking" || snapshot.status === "working";
+  // Stuck if active state but no events for >90s (matches the backend
+  // stuck_watchdog threshold).
+  const looksStuck = active && idleSeconds >= 90;
+  const idleLabel =
+    idleSeconds < 60
+      ? `${idleSeconds}s`
+      : idleSeconds < 3600
+        ? `${Math.floor(idleSeconds / 60)}m`
+        : `${Math.floor(idleSeconds / 3600)}h`;
+
   // Local-only message used to surface slash-command feedback in the chat
   // (success / failure / help). Doesn't go through the agent.
   const pushLocal = (content: string) => {
@@ -268,6 +291,7 @@ export function ChatPanel({ agentId, onClose }: Props) {
 /spawn <Preset> [as <CustomName>]   alias for /agent
 /kill <Name>                        terminate an agent by name
 /compact                            summarize this agent's context + restart it (frees context)
+/restart                            kill + respawn this agent with the same spec (unstick a hung agent)
 /list                               show current team
 /help                               this help
 Available presets: ${presetList}`,
@@ -356,6 +380,17 @@ Available presets: ${presetList}`,
       return true;
     }
 
+    if (cmd === "restart") {
+      pushLocal("Restarting this agent — kill + respawn with the same spec…");
+      try {
+        const snap = await restartAgent(agentId, record.snapshot.spec);
+        pushLocal(`Restarted as new id ${snap.id.slice(0, 8)}`);
+      } catch (e: any) {
+        pushLocal(`Restart failed: ${e?.message ?? e}`);
+      }
+      return true;
+    }
+
     if (cmd === "kill") {
       if (args.length === 0) {
         pushLocal(`Usage: /kill <Name>`);
@@ -416,6 +451,7 @@ Available presets: ${presetList}`,
     }
 
     try {
+      if (await routeDirectUserMentions(outgoing)) return;
       await api.sendAgent(agentId, outgoing);
     } catch (e) {
       console.error(e);
@@ -509,8 +545,23 @@ Available presets: ${presetList}`,
               {agentWorkspaceName}
             </span>
           </div>
-          <div className="text-[10px] text-base-500 truncate font-mono">
-            {shortPath(snapshot.spec.cwd)}
+          <div className="text-[10px] text-base-500 truncate font-mono flex items-center gap-2">
+            <span className="truncate">{shortPath(snapshot.spec.cwd)}</span>
+            <span
+              className={cn(
+                "shrink-0 px-1.5 py-0.5 rounded border",
+                looksStuck
+                  ? "text-(--color-accent-amber) border-(--color-accent-amber)/40 bg-(--color-accent-amber)/10"
+                  : "text-base-500 border-base-700/60",
+              )}
+              title={
+                looksStuck
+                  ? `Active state but no events for ${idleSeconds}s — agent may be stuck. Try /restart.`
+                  : `Last event ${idleSeconds}s ago`
+              }
+            >
+              {looksStuck ? `stuck? ${idleLabel}` : `${idleLabel} idle`}
+            </span>
           </div>
         </div>
         <CardLinkBadge agentId={agentId} />
@@ -783,7 +834,7 @@ Available presets: ${presetList}`,
                 submit();
               }
             }}
-            placeholder={`Message ${snapshot.spec.name}…  (type / for commands, @ for mentions)`}
+            placeholder={`Message ${snapshot.spec.name}…  (type / for commands, @ for mentions, @all to broadcast)`}
             rows={2}
             className="flex-1 resize-none bg-base-950 border border-base-700 rounded-md px-3 py-2 text-sm font-mono outline-none focus:border-(--color-accent-cyan)/50"
           />
@@ -921,6 +972,38 @@ const MessageBubble = memo(function MessageBubble({
     </div>
   );
 });
+
+async function routeDirectUserMentions(text: string): Promise<boolean> {
+  const mentioned: string[] = [];
+  let body = text.trimStart();
+  while (true) {
+    const match = body.match(/^@([\p{L}\p{N}_-]+)(?=\s|$)/u);
+    if (!match) break;
+    mentioned.push(match[1].toLowerCase());
+    body = body.slice(match[0].length).trimStart();
+  }
+  if (mentioned.length === 0 || body.length === 0) return false;
+
+  const records = Object.values(useStore.getState().agents);
+  const byName = new Map(
+    records.map((record) => [record.snapshot.spec.name.toLowerCase(), record.snapshot.id]),
+  );
+  const targetIds = new Set<string>();
+
+  if (mentioned.includes("all")) {
+    records.forEach((record) => targetIds.add(record.snapshot.id));
+  } else {
+    mentioned.forEach((name) => {
+      const id = byName.get(name);
+      if (id) targetIds.add(id);
+    });
+  }
+
+  if (targetIds.size === 0) return false;
+
+  await Promise.all([...targetIds].map((id) => api.sendAgent(id, body)));
+  return true;
+}
 
 function ApprovalCard({
   msgId, proposal, agentId,

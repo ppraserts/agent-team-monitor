@@ -34,6 +34,7 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [theme, setTheme] = useState<ThemeKey>("cyan");
   const [defaultCwd, setDefaultCwd] = useState("");
   const [defaultClaudeBin, setDefaultClaudeBin] = useState("");
+  const [defaultCodexBin, setDefaultCodexBin] = useState("");
   const [defaultSkipPerms, setDefaultSkipPerms] = useState(false);
   const [defaultAllowMentions, setDefaultAllowMentions] = useState(true);
   const [bitbucketAuthMode, setBitbucketAuthMode] = useState<"bearer" | "basic">("bearer");
@@ -44,6 +45,7 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [dataPath, setDataPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [homeDir, setHomeDir] = useState("");
 
   // Plan / limits — mirror what claude.ai shows.
   const [planTier, setPlanTier] = useState<PlanTier>("max-20x");
@@ -72,10 +74,16 @@ export function SettingsDialog({ open, onClose }: Props) {
       api.usageStats(),
       api.dataPath(),
       api.runtimeDiagnostics(),
-    ]).then(([s, st, dp, diag]) => {
+      api.homeDir(),
+    ]).then(([s, st, dp, diag, home]) => {
+      const conventionalCodexBin = home
+        ? `${home}\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe`
+        : "";
+      setHomeDir(home ?? "");
       setTheme((s.theme as ThemeKey) || "cyan");
       setDefaultCwd(s.default_cwd || "");
       setDefaultClaudeBin(s.default_claude_bin || "");
+      setDefaultCodexBin(s.default_codex_bin || conventionalCodexBin);
       setDefaultSkipPerms(s.default_skip_perms === "true");
       setDefaultAllowMentions(s.default_allow_mentions !== "false");
       setBitbucketAuthMode(s.bitbucket_auth_mode === "basic" ? "basic" : "bearer");
@@ -217,6 +225,19 @@ export function SettingsDialog({ open, onClose }: Props) {
                 className="input font-mono text-xs"
               />
             </Field>
+            <Field label="Codex binary override">
+              <input
+                value={defaultCodexBin}
+                onChange={(e) => setDefaultCodexBin(e.target.value)}
+                onBlur={() => save("default_codex_bin", defaultCodexBin.trim())}
+                placeholder={
+                  homeDir
+                    ? `${homeDir}\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe`
+                    : "C:\\Users\\you\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe"
+                }
+                className="input font-mono text-xs"
+              />
+            </Field>
 
             <ToggleRow
               checked={defaultAllowMentions}
@@ -234,8 +255,8 @@ export function SettingsDialog({ open, onClose }: Props) {
                 save("default_skip_perms", v ? "true" : "false");
               }}
               danger
-              label="--dangerously-skip-permissions by default"
-              hint="DANGER: skips Claude's tool prompts. Combine with @mention routing only for trusted local work."
+              label="Bypass runtime permission prompts by default"
+              hint="DANGER: skips the selected runtime's approval/sandbox prompts where supported. Combine with @mention routing only for trusted local work."
             />
           </Section>
 
@@ -320,7 +341,7 @@ export function SettingsDialog({ open, onClose }: Props) {
               <div className="text-xs text-base-500">loading...</div>
             )}
             <div className="text-[10px] text-base-500">
-              Required for the full app: npm/npx, Claude CLI, Cargo/Rust. Bun is optional.
+              Required for the full app: npm/npx, Cargo/Rust, and at least one agent runtime (Claude or Codex). Bun is optional.
             </div>
           </Section>
 
@@ -372,7 +393,7 @@ export function SettingsDialog({ open, onClose }: Props) {
 
           <Section icon={<Gauge size={12} />} title="Reliability harness defaults">
             <div className="text-[10px] text-base-500">
-              Zero means unlimited. Non-zero budgets are copied into new agents and enforced by the backend with an audit event and kill switch.
+              Optional guardrails. Zero means unlimited. Non-zero budgets are copied into new agents and enforced by the backend with an audit event and kill switch.
             </div>
             <div className="grid grid-cols-2 gap-2">
               <NumberField
@@ -412,8 +433,8 @@ export function SettingsDialog({ open, onClose }: Props) {
             </div>
           </Section>
 
-          {/* ----- Plan limits (mirrors claude.ai) ----- */}
-          <Section icon={<Zap size={12} />} title="Plan & limits (used by Usage panel)">
+          {/* ----- Claude plan limits ----- */}
+          <Section icon={<Zap size={12} />} title="Claude plan & limits (used by Usage panel)">
             <Field label="Plan tier (selecting one applies its defaults — override below)">
               <select
                 value={planTier}

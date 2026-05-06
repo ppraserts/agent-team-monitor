@@ -57,6 +57,7 @@ struct AgentHandle {
 pub struct AgentManager {
     /// Single struct holds both maps to make updates atomic under one lock.
     registry: Arc<RwLock<Registry>>,
+    pending_replies: Arc<Mutex<HashMap<String, Vec<PendingReply>>>>,
     app: AppHandle,
     db: Arc<Db>,
 }
@@ -67,10 +68,16 @@ struct Registry {
     by_name: HashMap<String, String>, // name -> id
 }
 
+#[derive(Clone)]
+struct PendingReply {
+    requester_id: String,
+}
+
 impl AgentManager {
     pub fn new(app: AppHandle, db: Arc<Db>) -> Self {
         Self {
             registry: Arc::new(RwLock::new(Registry::default())),
+            pending_replies: Arc::new(Mutex::new(HashMap::new())),
             app,
             db,
         }
@@ -189,6 +196,7 @@ impl AgentManager {
         spawn_stderr_reader(self.clone(), id.clone(), stderr, handle.stderr_tail.clone());
         spawn_exit_watcher(self.clone(), id.clone(), child, kill_rx);
         spawn_runtime_watchdog(self.clone(), id.clone());
+        spawn_stuck_watchdog(self.clone(), id.clone());
 
         let snap = snapshot_of(&handle);
         self.emit(AgentEvent::Created {
@@ -659,7 +667,6 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
         ParsedEvent::AssistantText { text } => {
             mgr.set_status(agent_id, AgentStatus::Working);
             let ts = Utc::now();
-            detect_and_route_mentions(mgr, agent_id, &text).await;
             detect_and_apply_board_actions(mgr, agent_id, &text).await;
             let display_text = strip_tagged_blocks(&text, "BOARD_ACTION")
                 .trim()
@@ -675,10 +682,14 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
                 mgr.emit(AgentEvent::Message {
                     agent_id: agent_id.to_string(),
                     role: "assistant".into(),
-                    content: display_text,
+                    content: display_text.clone(),
                     ts,
                     from_agent_id: None,
                 });
+                let routed_pending = route_pending_replies(mgr, agent_id, &display_text).await;
+                if !routed_pending {
+                    detect_and_route_mentions(mgr, agent_id, &display_text).await;
+                }
             }
         }
         ParsedEvent::ToolUse { tool, input } => {
@@ -742,6 +753,10 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
 }
 
 fn spawn_runtime_watchdog(mgr: AgentManager, agent_id: String) {
+    // Wall-clock kills shorter than this catch idle agents waiting for the
+    // user, not actual runaway loops. Anyone explicitly opting into a wall-
+    // clock cap gets at least this much headroom.
+    const MIN_RUNTIME_MS: u64 = 30 * 60 * 1000;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -756,6 +771,7 @@ fn spawn_runtime_watchdog(mgr: AgentManager, agent_id: String) {
             if max_runtime_ms == 0 {
                 break;
             }
+            let max_runtime_ms = max_runtime_ms.max(MIN_RUNTIME_MS);
             let elapsed_ms = (Utc::now() - h.started_at).num_milliseconds().max(0) as u64;
             if elapsed_ms >= max_runtime_ms {
                 emit_harness_alert(
@@ -779,6 +795,64 @@ fn spawn_runtime_watchdog(mgr: AgentManager, agent_id: String) {
     });
 }
 
+/// Detect "stuck" agents: in Thinking/Working state but no events for a long
+/// time. We don't auto-kill — just surface a HarnessAlert so the UI can show
+/// "appears stuck" and the user can decide to /restart. Re-arms after each
+/// activity, so a slow but progressing agent doesn't get spammed.
+fn spawn_stuck_watchdog(mgr: AgentManager, agent_id: String) {
+    const STUCK_THRESHOLD_MS: i64 = 90_000;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+    tokio::spawn(async move {
+        let mut last_alert_at: Option<chrono::DateTime<Utc>> = None;
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            let h = {
+                let reg = mgr.registry.read();
+                reg.by_id.get(&agent_id).cloned()
+            };
+            let Some(h) = h else {
+                break;
+            };
+            let status = *h.status.read();
+            let last = *h.last_activity.read();
+            let idle_ms = (Utc::now() - last).num_milliseconds();
+
+            // Reset the alert latch any time the agent makes progress so the
+            // next stall (if any) gets reported again.
+            if idle_ms < STUCK_THRESHOLD_MS {
+                last_alert_at = None;
+                continue;
+            }
+            // Only alert for active states — Idle agents are correctly silent
+            // because they're waiting for the user.
+            let active = matches!(status, AgentStatus::Thinking | AgentStatus::Working);
+            if !active {
+                continue;
+            }
+            // Don't re-emit while still inside the same stall.
+            if last_alert_at.map_or(false, |t| t >= last) {
+                continue;
+            }
+            emit_harness_alert(
+                &mgr,
+                &agent_id,
+                "warn",
+                "agent_appears_stuck",
+                &format!(
+                    "no events for {}s while {:?} — agent may be hung. Try /restart if it doesn't recover.",
+                    idle_ms / 1000,
+                    status
+                ),
+                Some(serde_json::json!({
+                    "idle_ms": idle_ms,
+                    "status": format!("{:?}", status),
+                })),
+            );
+            last_alert_at = Some(Utc::now());
+        }
+    });
+}
+
 async fn enforce_reliability_policy(mgr: &AgentManager, agent_id: &str) {
     let h = {
         let reg = mgr.registry.read();
@@ -789,7 +863,6 @@ async fn enforce_reliability_policy(mgr: &AgentManager, agent_id: &str) {
     };
     let usage = h.usage.read().clone();
     let tool_calls = *h.tool_calls.read();
-    let ctx = *h.current_context.read();
     let mut breach: Option<(&str, String, serde_json::Value)> = None;
 
     if h.spec.max_turns > 0 && usage.turns >= h.spec.max_turns {
@@ -816,13 +889,13 @@ async fn enforce_reliability_policy(mgr: &AgentManager, agent_id: &str) {
             ),
             serde_json::json!({ "cost_usd": usage.total_cost_usd, "max_cost_usd": h.spec.max_cost_usd }),
         ));
-    } else if ctx >= 190_000 {
-        breach = Some((
-            "context_overflow_risk",
-            format!("context is near hard limit ({} tokens)", ctx),
-            serde_json::json!({ "current_context_tokens": ctx, "hard_context_warning": 190000 }),
-        ));
     }
+    // NOTE: previously we also killed the agent at ctx >= 190k tokens to
+    // protect against Sonnet's 200k context window. That assumption is wrong
+    // for 1M-context models (Opus 4.7 [1m], Sonnet 4.6 [1m]) — a perfectly
+    // healthy long conversation would get pre-emptively killed every turn.
+    // The API itself rejects oversized requests cleanly, so the harness
+    // doesn't need to second-guess it.
 
     if let Some((failure_mode, message, data)) = breach {
         emit_harness_alert(mgr, agent_id, "error", failure_mode, &message, Some(data));
@@ -885,7 +958,7 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
         )
     };
 
-    let collaboration_protocol = "\n\n--- COLLABORATION DISCIPLINE ---\nUse @mentions only when you need concrete work, a blocker answer, review feedback, or a handoff from that teammate. Do not @mention for greetings, thanks, jokes, food/social chat, status noise, or open-ended prompts like \"anything else?\". When your assigned work is done, or there is no concrete next action, report the result to the user once and stop. If the user asks an off-topic/social question, answer briefly without involving teammates.\n";
+    let collaboration_protocol = "\n\n--- COLLABORATION DISCIPLINE ---\nUse @mentions when you need concrete work, a blocker answer, review feedback, a handoff from that teammate, or when the user explicitly asks you to greet/test the team. Prefer a dedicated line: `@TheirExactName <message>`. Do not @mention for unsolicited thanks, jokes, food/social chat, status noise, or open-ended prompts like \"anything else?\". When your assigned work is done, or there is no concrete next action, report the result to the user once and stop. If the user asks an off-topic/social question, answer briefly without involving teammates unless they explicitly asked for a team test.\n";
 
     let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card, delete_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
 
@@ -1489,7 +1562,7 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
                  -----\n\n\
                  @{from} addressed YOU (@{to}) directly with:\n\
                  {q}\n\n\
-                 (Reply naturally. To talk back to @{from} or anyone else, write `@TheirName <message>` on a new line.)",
+                 Reply to the user with your answer. Do not mention @{from} back unless you need a concrete blocker answer or handoff.",
                 from = from_name,
                 to = to_name,
                 ctx = context_body,
@@ -1506,6 +1579,14 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
             to_agent_id: Some(to_id.clone()),
             message: combined_q.clone(),
         });
+        mgr.pending_replies
+            .lock()
+            .await
+            .entry(to_id.clone())
+            .or_default()
+            .push(PendingReply {
+                requester_id: from_id.to_string(),
+            });
         // stdin gets the full contextual wrapper; UI bubble + DB record only
         // the bare question (the source's prior reply is already visible in
         // the source's own chat panel for anyone curious).
@@ -1520,32 +1601,117 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
     }
 }
 
-/// Parse `@Name <rest of line>` occurrences. Returns `(name, message)` per line.
+async fn route_pending_replies(mgr: &AgentManager, responder_id: &str, text: &str) -> bool {
+    let pending = {
+        let mut pending = mgr.pending_replies.lock().await;
+        pending.remove(responder_id).unwrap_or_default()
+    };
+    if pending.is_empty() {
+        return false;
+    }
+
+    let responder_name = mgr
+        .registry
+        .read()
+        .by_id
+        .get(responder_id)
+        .map(|h| h.spec.name.clone())
+        .unwrap_or_else(|| "Agent".to_string());
+
+    for reply in pending {
+        if reply.requester_id == responder_id {
+            continue;
+        }
+        let forwarded = format!(
+            "[REPLY FROM @{responder}]\n\n\
+             @{responder} answered your handoff:\n\
+             -----\n\
+             {text}\n\
+             -----\n\n\
+             Continue from this answer. Do not mention @{responder} back unless you need a concrete blocker answer or handoff.",
+            responder = responder_name,
+            text = text,
+        );
+        let display = format!("คำตอบจาก @{}:\n{}", responder_name, text);
+        let _ = mgr
+            .send_internal(
+                &reply.requester_id,
+                forwarded,
+                Some(display),
+                Some(responder_id.to_string()),
+            )
+            .await;
+    }
+    true
+}
+
+/// Parse explicit `@Name <message>` handoff blocks.
+///
+/// A handoff may span multiple lines:
+/// @Backend please review:
+/// 1. schema
+/// 2. API contract
+///
+/// The block ends at the next explicit @mention line or a blank line after the
+/// block has content. Inline mentions remain plain text and do not route.
 fn find_mentions(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with('@') {
+        if let Some((name, first_line)) = parse_mention_at(trimmed) {
+            if let Some((prev_name, parts)) = current.take() {
+                let msg = parts.join("\n").trim().to_string();
+                if !msg.is_empty() {
+                    out.push((prev_name, msg));
+                }
+            }
+            current = Some((name, vec![first_line]));
             continue;
         }
-        let rest = &trimmed[1..];
-        let name_end = rest
-            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
-            .unwrap_or(rest.len());
-        if name_end == 0 {
-            continue;
+
+        if let Some((name, parts)) = current.as_mut() {
+            if trimmed.is_empty() {
+                let msg = parts.join("\n").trim().to_string();
+                if !msg.is_empty() {
+                    out.push((name.clone(), msg));
+                }
+                current = None;
+            } else {
+                parts.push(line.trim_end().to_string());
+            }
         }
-        let to_name = rest[..name_end].to_string();
-        let msg = rest[name_end..]
-            .trim_start_matches([':', ' ', ','])
-            .trim()
-            .to_string();
-        if msg.is_empty() {
-            continue;
-        }
-        out.push((to_name, msg));
     }
+
+    if let Some((name, parts)) = current {
+        let msg = parts.join("\n").trim().to_string();
+        if !msg.is_empty() {
+            out.push((name, msg));
+        }
+    }
+
     out
+}
+
+fn parse_mention_at(line: &str) -> Option<(String, String)> {
+    let rest = line.get(1..)?;
+    let name_end = rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(rest.len());
+    if name_end == 0 {
+        return None;
+    }
+    let to_name = rest[..name_end].to_string();
+    let msg = rest[name_end..]
+        .trim_start_matches([':', ' ', ',', '!', '.', '?'])
+        .trim()
+        .to_string();
+    if msg.is_empty() {
+        None
+    } else {
+        Some((to_name, msg))
+    }
 }
 
 fn is_low_signal_mention(msg: &str) -> bool {

@@ -330,7 +330,8 @@ fn runtime_diagnostics() -> RuntimeDiagnostics {
         runtime_check("bun", &["--version"], false),
         runtime_check("cargo", &["--version"], false),
         runtime_check("rustc", &["--version"], false),
-        runtime_check("claude", &["--version"], true),
+        runtime_check("claude", &["--version"], false),
+        runtime_check("codex", &["--version"], false),
         runtime_check("npx", &["--version"], true),
     ];
     RuntimeDiagnostics { checks }
@@ -380,6 +381,14 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
         }
     };
 
+    for path in well_known_runtime_paths(name) {
+        if path.is_file() {
+            let path = path.display().to_string();
+            let version = version_for_runtime(&path, args);
+            return Some((path, version));
+        }
+    }
+
     for bin in &bins {
         if let Ok(out) = std::process::Command::new(finder).arg(bin).output() {
             if out.status.success() {
@@ -388,23 +397,85 @@ fn which_with_version(name: &str, args: &[&str]) -> Option<(String, Option<Strin
                     if path.is_empty() {
                         continue;
                     }
-                    let version = std::process::Command::new(&path)
-                        .args(args)
-                        .output()
-                        .ok()
-                        .and_then(|o| {
-                            if o.status.success() {
-                                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                            } else {
-                                None
-                            }
-                        });
+                    let version = version_for_runtime(&path, args);
                     return Some((path, version));
                 }
             }
         }
     }
     None
+}
+
+fn version_for_runtime(path: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(path)
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn well_known_runtime_paths(name: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        if name == "codex" {
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                out.push(
+                    PathBuf::from(&local)
+                        .join("OpenAI")
+                        .join("Codex")
+                        .join("bin")
+                        .join("codex.exe"),
+                );
+                let packages = PathBuf::from(&local).join("Packages");
+                if let Ok(entries) = std::fs::read_dir(packages) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with("OpenAI.Codex_") {
+                            out.push(
+                                entry
+                                    .path()
+                                    .join("LocalCache")
+                                    .join("Local")
+                                    .join("OpenAI")
+                                    .join("Codex")
+                                    .join("bin")
+                                    .join("codex.exe"),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Ok(profile) = std::env::var("USERPROFILE") {
+                out.push(
+                    PathBuf::from(profile)
+                        .join("AppData")
+                        .join("Local")
+                        .join("OpenAI")
+                        .join("Codex")
+                        .join("bin")
+                        .join("codex.exe"),
+                );
+            }
+            if let Some(home) = dirs::home_dir() {
+                out.push(
+                    home.join("AppData")
+                        .join("Local")
+                        .join("OpenAI")
+                        .join("Codex")
+                        .join("bin")
+                        .join("codex.exe"),
+                );
+            }
+        }
+    }
+    out
 }
 
 #[tauri::command]

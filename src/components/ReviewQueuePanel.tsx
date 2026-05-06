@@ -60,15 +60,21 @@ export function ReviewQueuePanel({ cwd, onClose }: Props) {
     try {
       const preset = findPreset("Reviewer") ?? PRESETS[0];
       const settings = await api.settingsGetAll().catch(() => ({} as Record<string, string>));
+      const vendors = await api.listVendors().catch(() => []);
+      const preferredVendor = vendors.some((v) => v.name === "codex") ? "codex" : "claude";
       const snap = await api.spawnAgent({
         name: nextReviewerName(),
         role: "PR review gate",
         cwd,
         system_prompt: `${preset.system_prompt}${SAFETY_PROTOCOL}`,
         model: null,
+        reasoning_effort: preferredVendor === "codex" ? "medium" : null,
         color: preset.color,
-        vendor: "claude",
-        vendor_binary: settings.default_claude_bin || null,
+        vendor: preferredVendor,
+        vendor_binary:
+          preferredVendor === "codex"
+            ? settings.default_codex_bin || null
+            : settings.default_claude_bin || null,
         workspace_id: activeWorkspace?.id ?? null,
         skip_permissions: settings.default_skip_perms === "true",
         allow_mentions: settings.default_allow_mentions !== "false",

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   X, Bot, Terminal as TerminalIcon, ShieldAlert, AtSign, Save, Trash2, ShieldCheck,
 } from "lucide-react";
@@ -25,10 +25,13 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [vendors, setVendors] = useState<VendorInfo[]>([]);
   const [vendor, setVendor] = useState<string>("claude");
   const [vendorBinary, setVendorBinary] = useState("");
+  const [defaultBins, setDefaultBins] = useState<Record<string, string>>({});
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [cwd, setCwd] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
+  const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState("medium");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +46,7 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [maxRuntimeMs, setMaxRuntimeMs] = useState(0);
 
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
+  const didAutoPickRuntime = useRef(false);
 
   // Load defaults from settings on every open + custom presets list.
   useEffect(() => {
@@ -52,14 +56,19 @@ export function SpawnDialog({ open, onClose }: Props) {
       if (s.default_skip_perms != null) setSkipPerms(s.default_skip_perms === "true");
       if (s.default_allow_mentions != null)
         setAllowMentions(s.default_allow_mentions !== "false");
-      if (s.default_claude_bin != null) setVendorBinary(s.default_claude_bin);
+      const bins: Record<string, string> = {
+        claude: s.default_claude_bin ?? "",
+        codex: s.default_codex_bin ?? "",
+      };
+      setDefaultBins(bins);
+      setVendorBinary(bins[vendor] ?? "");
       setMaxTurns(numOr(s.harness_max_turns, 0));
       setMaxToolCalls(numOr(s.harness_max_tool_calls, 0));
       setMaxCostUsd(numOr(s.harness_max_cost_usd, 0));
       setMaxRuntimeMs(numOr(s.harness_max_runtime_ms, 0));
     }).catch(() => {});
     api.presetsList().then(setCustomPresets).catch(() => {});
-  }, [open, activeWorkspace?.root, cwd]);
+  }, [open, activeWorkspace?.root, cwd, vendor]);
 
   const refreshCustomPresets = () =>
     api.presetsList().then(setCustomPresets).catch(() => {});
@@ -88,7 +97,13 @@ export function SpawnDialog({ open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    api.listVendors().then(setVendors).catch(() => {});
+    api.listVendors().then((items) => {
+      setVendors(items);
+      if (!didAutoPickRuntime.current && vendor === "claude" && items.some((v) => v.name === "codex")) {
+        didAutoPickRuntime.current = true;
+        setVendor("codex");
+      }
+    }).catch(() => {});
     if (!cwd) setCwd(activeWorkspace?.root ?? homeDir ?? "");
   }, [open, activeWorkspace?.root, homeDir, cwd]);
 
@@ -97,6 +112,40 @@ export function SpawnDialog({ open, onClose }: Props) {
     setRole(p.role);
     setSystemPrompt(p.system_prompt);
   };
+
+  const runtimeOptions = vendors.filter((v) => v.name === "claude" || v.name === "codex");
+  const vendorLabel = vendor === "codex" ? "Codex" : vendor === "claude" ? "Claude" : vendor;
+  const vendorDefaultKey = vendor === "codex" ? "default_codex_bin" : "default_claude_bin";
+  const modelOptions =
+    vendor === "codex"
+      ? [
+          ["", "Codex default"],
+          ["gpt-5.5", "GPT-5.5"],
+          ["gpt-5.4", "GPT-5.4"],
+          ["gpt-5.4-mini", "GPT-5.4 Mini"],
+          ["gpt-5.3-codex", "GPT-5.3 Codex"],
+          ["gpt-5.2", "GPT-5.2"],
+        ]
+      : [
+          ["", "Claude default"],
+          ["claude-opus-4-7", "Claude Opus 4.7"],
+          ["claude-sonnet-4-6", "Claude Sonnet 4.6"],
+          ["claude-haiku-4-5", "Claude Haiku 4.5"],
+          ["claude-opus-4-6", "Claude Opus 4.6"],
+          ["claude-opus-4-5", "Claude Opus 4.5"],
+          ["claude-opus-4-1", "Claude Opus 4.1"],
+          ["claude-sonnet-4-5", "Claude Sonnet 4.5"],
+        ];
+  const conventionalCodexBin = homeDir
+    ? `${homeDir}\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe`
+    : "";
+
+  useEffect(() => {
+    if (!open || vendor !== "codex" || vendorBinary.trim()) return;
+    const resolved = vendors.find((v) => v.name === "codex")?.binary;
+    const fallback = defaultBins.codex || resolved || conventionalCodexBin;
+    if (fallback) setVendorBinary(fallback);
+  }, [open, vendor, vendorBinary, vendors, defaultBins.codex, conventionalCodexBin]);
 
   const submit = async () => {
     setBusy(true);
@@ -122,10 +171,14 @@ export function SpawnDialog({ open, onClose }: Props) {
           role: role.trim() || "Agent",
           cwd: cwd.trim(),
           system_prompt: finalPrompt || null,
-          model: null,
+          model: model.trim() || null,
+          reasoning_effort: vendor === "codex" ? reasoningEffort : null,
           color: null,
           vendor,
-          vendor_binary: vendorBinary.trim() || null,
+          vendor_binary:
+            vendorBinary.trim() ||
+            (vendor === "codex" ? conventionalCodexBin : "") ||
+            null,
           workspace_id: activeWorkspace?.id ?? null,
           skip_permissions: effectiveSkipPerms,
           allow_mentions: allowMentions,
@@ -270,34 +323,75 @@ export function SpawnDialog({ open, onClose }: Props) {
               <Field label="Agent runtime">
                 <select
                   value={vendor}
-                  onChange={(e) => setVendor(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    didAutoPickRuntime.current = true;
+                    setVendor(next);
+                    setVendorBinary(defaultBins[next] ?? "");
+                    setModel("");
+                    setReasoningEffort("medium");
+                  }}
                   className="input"
                 >
-                  {vendors
-                    .filter((v) => v.name === "claude")
-                    .map((v) => (
-                      <option key={v.name} value={v.name}>
-                        {v.name} - {v.binary}
-                      </option>
-                    ))}
-                  {!vendors.some((v) => v.name === "claude") && (
+                  {runtimeOptions.map((v) => (
+                    <option key={v.name} value={v.name}>
+                      {v.name} - {v.binary}
+                    </option>
+                  ))}
+                  {!runtimeOptions.some((v) => v.name === "claude") && (
                     <option value="claude">claude - resolved at spawn time</option>
+                  )}
+                  {!runtimeOptions.some((v) => v.name === "codex") && (
+                    <option value="codex">codex - resolved at spawn time</option>
                   )}
                 </select>
               </Field>
-              {vendor === "claude" && (
-                <Field label="Claude binary override (optional)">
-                  <input
-                    value={vendorBinary}
-                    onChange={(e) => setVendorBinary(e.target.value)}
-                    onBlur={() =>
-                      api.settingsSet("default_claude_bin", vendorBinary.trim()).catch(() => {})
-                    }
-                    placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
-                    className="input font-mono text-xs"
-                  />
+              <div className={cn("grid gap-2", vendor === "codex" ? "grid-cols-2" : "grid-cols-1")}>
+                <Field label="Model">
+                  <select
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    className="input"
+                  >
+                    {modelOptions.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
-              )}
+                {vendor === "codex" && (
+                  <Field label="Reasoning effort">
+                    <select
+                      value={reasoningEffort}
+                      onChange={(e) => setReasoningEffort(e.target.value)}
+                      className="input"
+                    >
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="xhigh">Extra High</option>
+                    </select>
+                  </Field>
+                )}
+              </div>
+              <Field label={`${vendorLabel} binary override (optional)`}>
+                <input
+                  value={vendorBinary}
+                  onChange={(e) => setVendorBinary(e.target.value)}
+                  onBlur={() => {
+                    const value = vendorBinary.trim();
+                    setDefaultBins((prev) => ({ ...prev, [vendor]: value }));
+                    api.settingsSet(vendorDefaultKey, value).catch(() => {});
+                  }}
+                  placeholder={
+                    vendor === "codex"
+                      ? conventionalCodexBin || "C:\\Users\\you\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe"
+                      : "C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+                  }
+                  className="input font-mono text-xs"
+                />
+              </Field>
             </>
           )}
 
@@ -376,7 +470,7 @@ export function SpawnDialog({ open, onClose }: Props) {
                 onChange={setRequireApproval}
                 icon={<ShieldCheck size={12} />}
                 label="Ask for approval before destructive ops (model-mediated)"
-                hint="The agent is instructed to emit <<PROPOSAL>>...<<END_PROPOSAL>> before write / commit / install / deploy work. This implicitly turns ON --dangerously-skip-permissions so approved tools can run. It is not a host-level sandbox; use only with agents you trust."
+                hint="The agent is instructed to emit <<PROPOSAL>>...<<END_PROPOSAL>> before write / commit / install / deploy work. For Claude this enables skip-permissions after approval; for Codex it maps to bypassing Codex approvals/sandbox. Use only with trusted local work."
               />
 
               {!requireApproval && (
@@ -385,14 +479,13 @@ export function SpawnDialog({ open, onClose }: Props) {
                   onChange={setSkipPerms}
                   icon={<ShieldAlert size={12} />}
                   danger
-                  label="Raw --dangerously-skip-permissions (no approval gate)"
-                  hint="DANGER: every Edit / Write / Bash call runs WITHOUT asking. Use only for trusted local automation."
+                  label="Bypass runtime permission prompts (no approval gate)"
+                  hint="DANGER: runtime tool calls may run without asking. Use only for trusted local automation."
                 />
               )}
               {requireApproval && (
                 <div className="text-[10px] text-base-500 ml-6 -mt-1">
-                  (skip-permissions is implicitly ON. Approval cards are enforced
-                  by the agent protocol, not by a host sandbox.)
+                  (runtime permission bypass is implicit. Approval cards are enforced by the agent protocol, not by a host sandbox.)
                 </div>
               )}
               {(maxTurns > 0 || maxToolCalls > 0 || maxCostUsd > 0 || maxRuntimeMs > 0) && (

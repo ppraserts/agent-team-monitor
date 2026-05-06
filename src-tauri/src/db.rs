@@ -243,6 +243,23 @@ impl Db {
             "ALTER TABLE agents ADD COLUMN max_runtime_ms INTEGER NOT NULL DEFAULT 0",
             [],
         );
+
+        // One-shot: clear the old aggressive harness defaults that used to be
+        // baked in at spawn time (10-min wall-clock, 12 turns, 80 tool calls).
+        // Anyone who explicitly chose those exact values is unlucky, but the
+        // alternative — silently killing collab sessions — is worse.
+        let _ = conn.execute(
+            "UPDATE agents SET max_runtime_ms = 0 WHERE max_runtime_ms = 600000",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE agents SET max_turns = 0 WHERE max_turns = 12",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE agents SET max_tool_calls = 0 WHERE max_tool_calls = 80",
+            [],
+        );
         Ok(())
     }
 
@@ -475,6 +492,7 @@ impl Db {
                 cwd: PathBuf::from(cwd_str),
                 vendor: row.get(5)?,
                 model: row.get(6)?,
+                reasoning_effort: None,
                 color: row.get(7)?,
                 system_prompt: row.get(8)?,
                 vendor_binary: row.get(9)?,

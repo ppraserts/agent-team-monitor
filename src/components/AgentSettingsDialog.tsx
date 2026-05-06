@@ -82,6 +82,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
         cwd: record.snapshot.spec.cwd, // not editable mid-convo
         system_prompt: finalPrompt || null,
         model: model.trim() || null,
+        reasoning_effort: record.snapshot.spec.reasoning_effort ?? null,
         color: record.snapshot.spec.color,
         vendor: record.snapshot.spec.vendor ?? "claude",
         vendor_binary: vendorBinary.trim() || null,
@@ -107,6 +108,8 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
   };
 
   const renamed = name.trim() && name.trim() !== record.snapshot.spec.name;
+  const runtime = record.snapshot.spec.vendor ?? "claude";
+  const runtimeLabel = runtime === "codex" ? "Codex" : runtime === "claude" ? "Claude" : runtime;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-base-950/80 backdrop-blur-sm">
@@ -150,7 +153,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
               <input
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                placeholder="claude-sonnet-4-5"
+                placeholder={runtime === "codex" ? "gpt-5.4" : "claude-sonnet-4-5"}
                 className="input font-mono text-xs"
               />
             </Field>
@@ -192,7 +195,7 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
               onChange={setRequireApproval}
               icon={<ShieldCheck size={12} />}
               label="Ask for approval before destructive ops (model-mediated)"
-              hint="Adds the proposal protocol and implicitly enables --skip-permissions so approved tools can run. This is not a host-level sandbox."
+              hint="Adds the proposal protocol and implicitly enables the runtime permission bypass so approved tools can run. This is not a host-level sandbox."
             />
 
             <ToggleRow
@@ -220,21 +223,20 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
                 onChange={setSkipPerms}
                 icon={<ShieldAlert size={12} />}
                 danger
-                label="Raw --dangerously-skip-permissions (no approval gate)"
-                hint="DANGER: every Edit / Write / Bash call runs without asking. Use only for trusted local automation."
+                label="Bypass runtime permission prompts (no approval gate)"
+                hint="DANGER: runtime tool calls may run without asking. Use only for trusted local automation."
               />
             )}
             {requireApproval && (
               <div className="text-[10px] text-base-500 ml-6 -mt-1">
-                (skip-permissions is implicitly ON. Approval cards are enforced
-                by the agent protocol, not by a host sandbox.)
+                (runtime permission bypass is implicit. Approval cards are enforced by the agent protocol, not by a host sandbox.)
               </div>
             )}
           </div>
 
           <div className="rounded-md border border-base-700/60 bg-base-900/40 p-3 space-y-2">
             <div className="text-[10px] tracking-wider text-base-500 uppercase mb-1">
-              Reliability Harness
+              Optional Guardrails
             </div>
             <div className="text-[10px] text-base-500">
               Zero means unlimited. The backend stops the agent and writes an audit event when a budget is exceeded.
@@ -247,11 +249,15 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
             </div>
           </div>
 
-          <Field label="Claude binary override (optional)">
+          <Field label={`${runtimeLabel} binary override (optional)`}>
             <input
               value={vendorBinary}
               onChange={(e) => setVendorBinary(e.target.value)}
-              placeholder="C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+              placeholder={
+                runtime === "codex"
+                  ? "C:\\Users\\you\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe"
+                  : "C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd"
+              }
               className="input font-mono text-xs"
             />
           </Field>
