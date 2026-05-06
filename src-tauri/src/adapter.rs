@@ -22,10 +22,7 @@ pub enum ParsedEvent {
         input: serde_json::Value,
     },
     /// End-of-turn result with token/cost accounting.
-    Result {
-        usage: AgentUsage,
-        duration_ms: u64,
-    },
+    Result { usage: AgentUsage, duration_ms: u64 },
 }
 
 pub trait AgentAdapter: Send + Sync + 'static {
@@ -113,7 +110,8 @@ impl AgentAdapter for ClaudeStreamJsonAdapter {
             cmd.arg("--model").arg(model);
         }
         if let Some(sp) = &spec.system_prompt {
-            cmd.arg("--append-system-prompt").arg(prompt_arg_for_process(sp));
+            cmd.arg("--append-system-prompt")
+                .arg(prompt_arg_for_process(sp));
         }
         Ok(cmd)
     }

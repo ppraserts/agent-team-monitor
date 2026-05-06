@@ -37,6 +37,10 @@ export function SpawnDialog({ open, onClose }: Props) {
   const [allowMentions, setAllowMentions] = useState(true); // teamwork is the whole point — default on
   const [allowlist, setAllowlist] = useState(""); // comma-separated names; empty = any
   const [requireApproval, setRequireApproval] = useState(true);
+  const [maxTurns, setMaxTurns] = useState(0);
+  const [maxToolCalls, setMaxToolCalls] = useState(0);
+  const [maxCostUsd, setMaxCostUsd] = useState(0);
+  const [maxRuntimeMs, setMaxRuntimeMs] = useState(0);
 
   const [customPresets, setCustomPresets] = useState<CustomPreset[]>([]);
 
@@ -49,6 +53,10 @@ export function SpawnDialog({ open, onClose }: Props) {
       if (s.default_allow_mentions != null)
         setAllowMentions(s.default_allow_mentions !== "false");
       if (s.default_claude_bin != null) setVendorBinary(s.default_claude_bin);
+      setMaxTurns(numOr(s.harness_max_turns, 0));
+      setMaxToolCalls(numOr(s.harness_max_tool_calls, 0));
+      setMaxCostUsd(numOr(s.harness_max_cost_usd, 0));
+      setMaxRuntimeMs(numOr(s.harness_max_runtime_ms, 0));
     }).catch(() => {});
     api.presetsList().then(setCustomPresets).catch(() => {});
   }, [open, activeWorkspace?.root, cwd]);
@@ -125,6 +133,10 @@ export function SpawnDialog({ open, onClose }: Props) {
             .split(",")
             .map((s) => s.trim())
             .filter(Boolean),
+          max_turns: maxTurns,
+          max_tool_calls: maxToolCalls,
+          max_cost_usd: maxCostUsd,
+          max_runtime_ms: maxRuntimeMs,
         });
         upsertAgent(snap);
       } else {
@@ -383,6 +395,13 @@ export function SpawnDialog({ open, onClose }: Props) {
                   by the agent protocol, not by a host sandbox.)
                 </div>
               )}
+              {(maxTurns > 0 || maxToolCalls > 0 || maxCostUsd > 0 || maxRuntimeMs > 0) && (
+                <div className="text-[10px] text-base-500 ml-6">
+                  Harness: {maxTurns || "∞"} turns · {maxToolCalls || "∞"} tools ·{" "}
+                  {maxCostUsd > 0 ? `$${maxCostUsd}` : "∞ cost"} ·{" "}
+                  {maxRuntimeMs > 0 ? `${Math.round(maxRuntimeMs / 60000)} min` : "∞ time"}
+                </div>
+              )}
             </div>
           )}
 
@@ -438,6 +457,12 @@ export function SpawnDialog({ open, onClose }: Props) {
       </div>
     </div>
   );
+}
+
+function numOr(s: string | undefined, fallback: number): number {
+  if (s == null || s === "") return fallback;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function TabBtn({

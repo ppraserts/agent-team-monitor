@@ -123,7 +123,11 @@ fn current_branch(cwd: &Path) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn upstream_for(cwd: &Path, branch: &str) -> Option<String> {
@@ -140,7 +144,11 @@ fn upstream_for(cwd: &Path, branch: &str) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn ahead_behind(cwd: &Path, branch: &str, upstream: &str) -> (u32, u32) {
@@ -248,10 +256,8 @@ pub fn changes(cwd: &Path) -> Result<GitChanges> {
         let xy = format!("{x}{y}");
         let is_untracked = x == '?' && y == '?';
         let is_ignored = x == '!' && y == '!';
-        let is_conflicted = x == 'U'
-            || y == 'U'
-            || (x == 'A' && y == 'A')
-            || (x == 'D' && y == 'D');
+        let is_conflicted =
+            x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
         let staged = !is_untracked && !is_ignored && x != ' ' && x != '?';
         let unstaged = is_untracked || (y != ' ' && y != '?');
 
@@ -436,7 +442,11 @@ pub fn branches(cwd: &Path) -> Result<Vec<GitBranch>> {
             name: short,
             is_current: head == "*",
             is_remote: refname.starts_with("refs/remotes/"),
-            upstream: if upstream.is_empty() { None } else { Some(upstream.to_string()) },
+            upstream: if upstream.is_empty() {
+                None
+            } else {
+                Some(upstream.to_string())
+            },
         });
     }
     Ok(out)
@@ -490,10 +500,7 @@ pub fn stash_list(cwd: &Path) -> Result<Vec<GitStash>> {
     if !is_repo(cwd) {
         return Ok(Vec::new());
     }
-    let raw = run_ok(
-        cwd,
-        &["stash", "list", "--pretty=format:%gd%x1f%gs%x1f%s"],
-    )?;
+    let raw = run_ok(cwd, &["stash", "list", "--pretty=format:%gd%x1f%gs%x1f%s"])?;
     let mut out = Vec::new();
     for (idx, line) in raw.lines().enumerate() {
         let mut p = line.splitn(3, '\x1f');

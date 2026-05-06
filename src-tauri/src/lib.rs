@@ -20,9 +20,7 @@ use serde::Serialize;
 use crate::agent::{AgentSnapshot, AgentSpec, ResumeOptions};
 use crate::boards::{Board, BoardCard, BoardColumn, CardInput};
 use crate::db::{CustomPreset, Db, HistoryAgent, HistoryMessage, Mission, UsageStats, Workspace};
-use crate::git::{
-    GitBranch, GitChanges, GitCommit, GitCommitPayload, GitDiffRequest, GitStash,
-};
+use crate::git::{GitBranch, GitChanges, GitCommit, GitCommitPayload, GitDiffRequest, GitStash};
 use crate::manager::AgentManager;
 use crate::pty::{PtyManager, PtySnapshot, PtySpec};
 use crate::sessions::ExternalSession;
@@ -106,6 +104,99 @@ struct MissionSavePayload {
     definition_of_done: Option<String>,
     constraints: Option<String>,
     set_active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BitbucketPrParts {
+    workspace: String,
+    repo: String,
+    pr_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BitbucketPrInfo {
+    workspace: String,
+    repo: String,
+    pr_id: u64,
+    url: String,
+    title: String,
+    state: String,
+    author: String,
+    source_branch: String,
+    destination_branch: String,
+    source_commit: Option<String>,
+    changed_files: Vec<String>,
+    has_more_files: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketUserRef {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    nickname: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketBranchRef {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketCommitRef {
+    #[serde(default)]
+    hash: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketEndpointRef {
+    #[serde(default)]
+    branch: Option<BitbucketBranchRef>,
+    #[serde(default)]
+    commit: Option<BitbucketCommitRef>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketPrResponse {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    author: Option<BitbucketUserRef>,
+    #[serde(default)]
+    source: Option<BitbucketEndpointRef>,
+    #[serde(default)]
+    destination: Option<BitbucketEndpointRef>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct BitbucketDiffPath {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct BitbucketDiffStatEntry {
+    #[serde(default)]
+    new: Option<BitbucketDiffPath>,
+    #[serde(default)]
+    old: Option<BitbucketDiffPath>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BitbucketPage<T> {
+    #[serde(default)]
+    values: Vec<T>,
+    #[serde(default)]
+    next: Option<String>,
+}
+
+enum BitbucketAuth {
+    Bearer(String),
+    Basic { username: String, password: String },
 }
 
 // ---------- Agent commands ----------
@@ -386,7 +477,10 @@ fn dedupe_workspaces(target_root: Option<&str>) -> Result<(), String> {
                         rusqlite::params![keep_id, duplicate.active_mission_id],
                     )?;
                 }
-                conn.execute("DELETE FROM workspaces WHERE id = ?1", rusqlite::params![duplicate_id])?;
+                conn.execute(
+                    "DELETE FROM workspaces WHERE id = ?1",
+                    rusqlite::params![duplicate_id],
+                )?;
                 conn.execute(
                     "UPDATE workspaces SET root_path = ?2 WHERE id = ?1",
                     rusqlite::params![keep.id, keep_root],
@@ -736,14 +830,11 @@ fn fs_rename(from: String, to: String) -> Result<String, String> {
     let to_abs = if to_buf.is_absolute() {
         to_buf
     } else {
-        from.parent()
-            .map(|p| p.join(&to_buf))
-            .unwrap_or(to_buf)
+        from.parent().map(|p| p.join(&to_buf)).unwrap_or(to_buf)
     };
     if let Some(parent) = to_abs.parent() {
         // Validates that the destination is inside the workspace.
-        validate_workspace_path(&parent.display().to_string())
-            .map_err(|e| e.to_string())?;
+        validate_workspace_path(&parent.display().to_string()).map_err(|e| e.to_string())?;
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {}", e))?;
         }
@@ -763,8 +854,7 @@ fn fs_delete(path: String) -> Result<(), String> {
     if path == workspace_root {
         return Err("refusing to delete the workspace root".to_string());
     }
-    let meta = std::fs::symlink_metadata(&path)
-        .map_err(|e| format!("stat failed: {}", e))?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat failed: {}", e))?;
     if meta.is_dir() {
         std::fs::remove_dir_all(&path).map_err(|e| format!("delete failed: {}", e))?;
     } else {
@@ -1002,6 +1092,80 @@ fn sanitize_file_stem(name: &str) -> String {
         .collect()
 }
 
+fn parse_bitbucket_pr_url(url: &str) -> Result<BitbucketPrParts, String> {
+    let marker = "bitbucket.org/";
+    let after_host = url
+        .split_once(marker)
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| "not a Bitbucket pull request URL".to_string())?;
+    let segments: Vec<&str> = after_host
+        .split(['/', '?', '#'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.len() < 4 || segments[2] != "pull-requests" {
+        return Err(
+            "expected https://bitbucket.org/{workspace}/{repo}/pull-requests/{id}".to_string(),
+        );
+    }
+    let pr_id = segments[3]
+        .parse::<u64>()
+        .map_err(|_| "pull request id is not a number".to_string())?;
+    Ok(BitbucketPrParts {
+        workspace: segments[0].to_string(),
+        repo: segments[1].to_string(),
+        pr_id,
+    })
+}
+
+fn bitbucket_auth() -> Result<BitbucketAuth, String> {
+    let settings = db().all_settings().map_err(|e| e.to_string())?;
+    let username = settings
+        .get("bitbucket_username")
+        .cloned()
+        .or_else(|| std::env::var("BITBUCKET_USERNAME").ok())
+        .unwrap_or_default();
+    let secret = settings
+        .get("bitbucket_access_token")
+        .cloned()
+        .or_else(|| std::env::var("BITBUCKET_ACCESS_TOKEN").ok())
+        .or_else(|| settings.get("bitbucket_app_password").cloned())
+        .or_else(|| std::env::var("BITBUCKET_APP_PASSWORD").ok())
+        .unwrap_or_default();
+    let auth_mode = settings
+        .get("bitbucket_auth_mode")
+        .cloned()
+        .or_else(|| std::env::var("BITBUCKET_AUTH_MODE").ok())
+        .unwrap_or_else(|| "bearer".to_string());
+
+    if secret.trim().is_empty() {
+        return Err(
+            "Bitbucket token is missing. Set bitbucket_access_token in Settings.".to_string(),
+        );
+    }
+    if auth_mode.trim().eq_ignore_ascii_case("basic") {
+        if username.trim().is_empty() {
+            return Err(
+                "Bitbucket username is missing. Set bitbucket_username in Settings.".to_string(),
+            );
+        }
+        return Ok(BitbucketAuth::Basic {
+            username: username.trim().to_string(),
+            password: secret.trim().to_string(),
+        });
+    }
+    Ok(BitbucketAuth::Bearer(secret.trim().to_string()))
+}
+
+fn apply_bitbucket_auth(
+    request: reqwest::RequestBuilder,
+    auth: &BitbucketAuth,
+) -> reqwest::RequestBuilder {
+    match auth {
+        BitbucketAuth::Bearer(token) => request.bearer_auth(token),
+        BitbucketAuth::Basic { username, password } => request.basic_auth(username, Some(password)),
+    }
+}
+
 fn tool(
     id: &str,
     name: &str,
@@ -1215,6 +1379,139 @@ fn settings_set(key: String, value: String) -> Result<(), String> {
     db().set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposalDecisionPayload {
+    key: String,
+    agent_id: String,
+    message_id: String,
+    proposal_index: i64,
+    body: String,
+    decision: String,
+    reason: Option<String>,
+}
+
+#[tauri::command]
+fn proposal_decision_record(payload: ProposalDecisionPayload) -> Result<(), String> {
+    db().save_proposal_decision(
+        &payload.key,
+        &payload.agent_id,
+        &payload.message_id,
+        payload.proposal_index,
+        &payload.body,
+        &payload.decision,
+        payload.reason.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+// ---------- Bitbucket review commands ----------
+
+#[tauri::command]
+async fn bitbucket_pr_fetch(url: String) -> Result<BitbucketPrInfo, String> {
+    let parts = parse_bitbucket_pr_url(&url)?;
+    let auth = bitbucket_auth()?;
+    let client = reqwest::Client::new();
+    let api_base = format!(
+        "https://api.bitbucket.org/2.0/repositories/{}/{}/pullrequests/{}",
+        parts.workspace, parts.repo, parts.pr_id
+    );
+
+    let pr: BitbucketPrResponse = apply_bitbucket_auth(client.get(&api_base), &auth)
+        .send()
+        .await
+        .map_err(|e| format!("Bitbucket PR request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Bitbucket PR request rejected: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Bitbucket PR response parse failed: {e}"))?;
+
+    let mut changed_files = Vec::new();
+    let mut next = Some(format!("{api_base}/diffstat?pagelen=100"));
+    let mut pages = 0usize;
+    while let Some(page_url) = next.take() {
+        pages += 1;
+        if pages > 10 {
+            next = Some(page_url);
+            break;
+        }
+        let page: BitbucketPage<BitbucketDiffStatEntry> =
+            apply_bitbucket_auth(client.get(&page_url), &auth)
+                .send()
+                .await
+                .map_err(|e| format!("Bitbucket diffstat request failed: {e}"))?
+                .error_for_status()
+                .map_err(|e| format!("Bitbucket diffstat request rejected: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("Bitbucket diffstat response parse failed: {e}"))?;
+        for item in page.values {
+            let path = item
+                .new
+                .and_then(|p| p.path)
+                .or_else(|| item.old.and_then(|p| p.path));
+            if let Some(path) = path {
+                if !changed_files.contains(&path) {
+                    changed_files.push(path);
+                }
+            }
+        }
+        next = page.next;
+    }
+
+    let author = pr
+        .author
+        .and_then(|a| a.display_name.or(a.nickname))
+        .unwrap_or_else(|| "unknown".to_string());
+    let source_branch = pr
+        .source
+        .as_ref()
+        .and_then(|s| s.branch.as_ref())
+        .and_then(|b| b.name.clone())
+        .unwrap_or_default();
+    let destination_branch = pr
+        .destination
+        .as_ref()
+        .and_then(|d| d.branch.as_ref())
+        .and_then(|b| b.name.clone())
+        .unwrap_or_default();
+    let source_commit = pr.source.and_then(|s| s.commit).and_then(|c| c.hash);
+
+    Ok(BitbucketPrInfo {
+        workspace: parts.workspace,
+        repo: parts.repo,
+        pr_id: parts.pr_id,
+        url,
+        title: pr.title,
+        state: pr.state,
+        author,
+        source_branch,
+        destination_branch,
+        source_commit,
+        changed_files,
+        has_more_files: next.is_some(),
+    })
+}
+
+#[tauri::command]
+async fn bitbucket_pr_approve(url: String) -> Result<(), String> {
+    let parts = parse_bitbucket_pr_url(&url)?;
+    let auth = bitbucket_auth()?;
+    let endpoint = format!(
+        "https://api.bitbucket.org/2.0/repositories/{}/{}/pullrequests/{}/approve",
+        parts.workspace, parts.repo, parts.pr_id
+    );
+    let client = reqwest::Client::new();
+    apply_bitbucket_auth(client.post(endpoint), &auth)
+        .send()
+        .await
+        .map_err(|e| format!("Bitbucket approve request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Bitbucket approve request rejected: {e}"))?;
+    Ok(())
+}
+
 // ---------- Custom preset commands ----------
 
 #[tauri::command]
@@ -1295,8 +1592,10 @@ fn boards_create(
     name: String,
     description: Option<String>,
 ) -> Result<Board, String> {
-    db().with_conn(|c| boards::create_board(c, workspace_id.as_deref(), &name, description.as_deref()))
-        .map_err(|e| e.to_string())
+    db().with_conn(|c| {
+        boards::create_board(c, workspace_id.as_deref(), &name, description.as_deref())
+    })
+    .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn boards_update(id: i64, name: String, description: Option<String>) -> Result<Board, String> {
@@ -1485,6 +1784,9 @@ pub fn run() {
             usage_stats,
             settings_get_all,
             settings_set,
+            proposal_decision_record,
+            bitbucket_pr_fetch,
+            bitbucket_pr_approve,
             presets_list,
             presets_save,
             presets_delete,

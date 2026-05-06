@@ -39,8 +39,12 @@ pub struct PtySpec {
     pub rows: u16,
 }
 
-fn default_cols() -> u16 { 120 }
-fn default_rows() -> u16 { 32 }
+fn default_cols() -> u16 {
+    120
+}
+fn default_rows() -> u16 {
+    32
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PtySnapshot {
@@ -88,7 +92,11 @@ impl PtyManager {
     }
 
     pub fn list(&self) -> Vec<PtySnapshot> {
-        self.inner.lock().values().map(|h| h.snapshot.clone()).collect()
+        self.inner
+            .lock()
+            .values()
+            .map(|h| h.snapshot.clone())
+            .collect()
     }
 
     pub fn spawn(&self, spec: PtySpec) -> Result<PtySnapshot> {
@@ -190,7 +198,13 @@ impl PtyManager {
             let status = child.wait().ok();
             let code = status.map(|s| s.exit_code() as i32);
             inner_map.lock().remove(&id_for_exit);
-            let _ = app2.emit(PTY_EXIT, PtyExitEvent { pty_id: id_for_exit, code });
+            let _ = app2.emit(
+                PTY_EXIT,
+                PtyExitEvent {
+                    pty_id: id_for_exit,
+                    code,
+                },
+            );
         });
 
         Ok(snapshot)
@@ -219,7 +233,12 @@ impl PtyManager {
         handle
             .master
             .lock()
-            .resize(PtySize { cols, rows, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                cols,
+                rows,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("pty resize failed")?;
         Ok(())
     }

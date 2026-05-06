@@ -31,6 +31,10 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
   const [skipPerms, setSkipPerms] = useState(false);
   const [model, setModel] = useState("");
   const [vendorBinary, setVendorBinary] = useState("");
+  const [maxTurns, setMaxTurns] = useState(0);
+  const [maxToolCalls, setMaxToolCalls] = useState(0);
+  const [maxCostUsd, setMaxCostUsd] = useState(0);
+  const [maxRuntimeMin, setMaxRuntimeMin] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,6 +59,10 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
     setSkipPerms(!hadProtocol && !!s.skip_permissions);
     setModel(s.model ?? "");
     setVendorBinary(s.vendor_binary ?? "");
+    setMaxTurns(s.max_turns ?? 0);
+    setMaxToolCalls(s.max_tool_calls ?? 0);
+    setMaxCostUsd(s.max_cost_usd ?? 0);
+    setMaxRuntimeMin(Math.round((s.max_runtime_ms ?? 0) / 60000));
     setError(null);
   }, [open, record]);
 
@@ -77,12 +85,17 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
         color: record.snapshot.spec.color,
         vendor: record.snapshot.spec.vendor ?? "claude",
         vendor_binary: vendorBinary.trim() || null,
+        workspace_id: record.snapshot.spec.workspace_id ?? null,
         skip_permissions: effectiveSkipPerms,
         allow_mentions: allowMentions,
         mention_allowlist: allowlist
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        max_turns: Math.max(0, Math.floor(maxTurns)),
+        max_tool_calls: Math.max(0, Math.floor(maxToolCalls)),
+        max_cost_usd: Math.max(0, maxCostUsd),
+        max_runtime_ms: Math.max(0, Math.floor(maxRuntimeMin)) * 60000,
       };
       await restartAgent(agentId, newSpec);
       onClose();
@@ -219,6 +232,21 @@ export function AgentSettingsDialog({ open, onClose, agentId }: Props) {
             )}
           </div>
 
+          <div className="rounded-md border border-base-700/60 bg-base-900/40 p-3 space-y-2">
+            <div className="text-[10px] tracking-wider text-base-500 uppercase mb-1">
+              Reliability Harness
+            </div>
+            <div className="text-[10px] text-base-500">
+              Zero means unlimited. The backend stops the agent and writes an audit event when a budget is exceeded.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField label="Max turns" value={maxTurns} onChange={setMaxTurns} />
+              <NumberField label="Max tool calls" value={maxToolCalls} onChange={setMaxToolCalls} />
+              <NumberField label="Max cost ($)" value={maxCostUsd} step={0.01} onChange={setMaxCostUsd} />
+              <NumberField label="Max runtime (minutes)" value={maxRuntimeMin} onChange={setMaxRuntimeMin} />
+            </div>
+          </div>
+
           <Field label="Claude binary override (optional)">
             <input
               value={vendorBinary}
@@ -274,6 +302,22 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-[10px] tracking-wider text-base-500 mb-1 uppercase">{label}</div>
       {children}
     </div>
+  );
+}
+
+function NumberField({
+  label, value, onChange, step,
+}: { label: string; value: number; onChange: (v: number) => void; step?: number }) {
+  return (
+    <Field label={label}>
+      <input
+        type="number"
+        value={value}
+        step={step ?? 1}
+        onChange={(e) => onChange(Number(e.target.value) || 0)}
+        className="input font-mono text-xs"
+      />
+    </Field>
   );
 }
 

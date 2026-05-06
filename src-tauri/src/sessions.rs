@@ -81,7 +81,9 @@ pub fn delete_external_session(jsonl_path: PathBuf) -> Result<()> {
     let path = jsonl_path.canonicalize()?;
 
     if !path.starts_with(&root) {
-        return Err(anyhow!("refusing to delete a session outside ~/.claude/projects"));
+        return Err(anyhow!(
+            "refusing to delete a session outside ~/.claude/projects"
+        ));
     }
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
         return Err(anyhow!("refusing to delete non-jsonl session file"));

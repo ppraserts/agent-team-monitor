@@ -313,6 +313,10 @@ Available presets: ${presetList}`,
       try {
         const settings = await api.settingsGetAll().catch(() => ({} as Record<string, string>));
         const allowMentions = settings.default_allow_mentions !== "false";
+        const maxTurns = numOr(settings.harness_max_turns, 0);
+        const maxToolCalls = numOr(settings.harness_max_tool_calls, 0);
+        const maxCostUsd = numOr(settings.harness_max_cost_usd, 0);
+        const maxRuntimeMs = numOr(settings.harness_max_runtime_ms, 0);
         const snap = await api.spawnAgent({
           name: customName,
           role: preset.role,
@@ -326,6 +330,10 @@ Available presets: ${presetList}`,
           skip_permissions: true,
           allow_mentions: allowMentions,
           mention_allowlist: [],
+          max_turns: maxTurns,
+          max_tool_calls: maxToolCalls,
+          max_cost_usd: maxCostUsd,
+          max_runtime_ms: maxRuntimeMs,
         });
         upsertAgent(snap);
         pushLocal(`Spawned @${customName} (${preset.role}) in ${snapshot.spec.cwd}`);
@@ -942,6 +950,14 @@ function ApprovalCard({
 
   const onApprove = async () => {
     recordDecision(key, "approved");
+    await api.proposalDecisionRecord({
+      key,
+      agentId,
+      messageId: msgId,
+      proposalIndex: proposal.index,
+      body: proposal.body,
+      decision: "approved",
+    }).catch((e) => console.error("proposal decision persist failed", e));
     await send("approved");
   };
   const onDeny = async () => {
@@ -952,6 +968,15 @@ function ApprovalCard({
       ? `denied: ${denyReason.trim()}`
       : "denied";
     recordDecision(key, "denied");
+    await api.proposalDecisionRecord({
+      key,
+      agentId,
+      messageId: msgId,
+      proposalIndex: proposal.index,
+      body: proposal.body,
+      decision: "denied",
+      reason: denyReason.trim() || null,
+    }).catch((e) => console.error("proposal decision persist failed", e));
     setDenying(false);
     setDenyReason("");
     await send(text);
@@ -1137,4 +1162,10 @@ function summarizeToolInput(input: unknown): string {
     }
   }
   return Object.keys(obj).join(", ");
+}
+
+function numOr(s: string | undefined, fallback: number): number {
+  if (s == null || s === "") return fallback;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
 }

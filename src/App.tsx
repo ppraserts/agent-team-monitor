@@ -8,6 +8,7 @@ import {
   Code2,
   Files,
   GitBranch,
+  GitPullRequest,
   Plus,
   X,
   PanelBottomClose,
@@ -55,8 +56,11 @@ const AgentGraph = lazy(() =>
 const UsagePanel = lazy(() =>
   import("./components/UsagePanel").then((module) => ({ default: module.UsagePanel })),
 );
+const ReviewQueuePanel = lazy(() =>
+  import("./components/ReviewQueuePanel").then((module) => ({ default: module.ReviewQueuePanel })),
+);
 
-type RightPaneMode = "feed" | "graph" | "usage" | "files" | "scm" | "off";
+type RightPaneMode = "feed" | "graph" | "usage" | "files" | "scm" | "reviews" | "off";
 
 export default function App() {
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -336,6 +340,14 @@ export default function App() {
             ts: new Date().toISOString(),
           });
           break;
+        case "harness_alert":
+          appendMessage(ev.agent_id, {
+            id: crypto.randomUUID(),
+            role: "system" as any,
+            content: `[harness:${ev.failure_mode}] ${ev.message}`,
+            ts: ev.ts,
+          });
+          break;
       }
     }).then((u) => {
       if (cancelled) {
@@ -485,6 +497,12 @@ export default function App() {
               label="Source Control"
             />
             <ToolbarBtn
+              active={rightPane === "reviews"}
+              onClick={() => setRightPane(rightPane === "reviews" ? "off" : "reviews")}
+              icon={<GitPullRequest size={13} />}
+              label="PR Reviews"
+            />
+            <ToolbarBtn
               active={rightPane === "files"}
               onClick={() => setRightPane(rightPane === "files" ? "off" : "files")}
               icon={<Files size={13} />}
@@ -601,6 +619,9 @@ export default function App() {
                 )}
                 {rightPane === "scm" && (
                   <SourceControlPanel cwd={workspaceDir} onClose={() => setRightPane("off")} />
+                )}
+                {rightPane === "reviews" && (
+                  <ReviewQueuePanel cwd={workspaceDir} onClose={() => setRightPane("off")} />
                 )}
               </Suspense>
             </div>
@@ -788,6 +809,12 @@ function RightRail({
         onClick={() => onMode("scm")}
         icon={<GitBranch size={15} />}
         label="Source Control"
+      />
+      <RailButton
+        active={mode === "reviews"}
+        onClick={() => onMode("reviews")}
+        icon={<GitPullRequest size={15} />}
+        label="PR Reviews"
       />
       <RailButton
         active={mode === "files"}

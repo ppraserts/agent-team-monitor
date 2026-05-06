@@ -89,12 +89,7 @@ fn scan_dir(claude_dir: &Path, scope: SkillScope, out: &mut Vec<SkillEntry>) {
 
 /// Commands can be nested in subfolders (e.g. `commands/git/commit.md` →
 /// `/git:commit`). Walk the tree and record each `.md` as a command.
-fn scan_commands_recursive(
-    root: &Path,
-    dir: &Path,
-    scope: SkillScope,
-    out: &mut Vec<SkillEntry>,
-) {
+fn scan_commands_recursive(root: &Path, dir: &Path, scope: SkillScope, out: &mut Vec<SkillEntry>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let p = entry.path();
@@ -105,9 +100,7 @@ fn scan_commands_recursive(
             // (matching how Claude Code displays nested commands).
             let rel = p.strip_prefix(root).unwrap_or(&p);
             let stem = rel.with_extension("");
-            let name = stem
-                .to_string_lossy()
-                .replace(['\\', '/'], ":");
+            let name = stem.to_string_lossy().replace(['\\', '/'], ":");
             if let Some(e) = read_entry_at(&p, SkillKind::Command, scope, name) {
                 out.push(e);
             }
@@ -228,12 +221,7 @@ fn sanitize_name(name: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn path_for(
-    cwd: &Path,
-    kind: SkillKind,
-    scope: SkillScope,
-    name: &str,
-) -> Result<PathBuf> {
+fn path_for(cwd: &Path, kind: SkillKind, scope: SkillScope, name: &str) -> Result<PathBuf> {
     let claude_root = match scope {
         SkillScope::Global => dirs::home_dir()
             .ok_or_else(|| anyhow!("no home dir"))?

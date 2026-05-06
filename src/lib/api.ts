@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type {
   AgentSnapshot,
   AgentSpec,
+  BitbucketPrInfo,
   Board,
   BoardCard,
   BoardColumn,
@@ -212,6 +213,30 @@ export const api = {
   settingsGetAll: () => invoke<Record<string, string>>("settings_get_all"),
   settingsSet: (key: string, value: string) =>
     invoke<void>("settings_set", { key, value }),
+  proposalDecisionRecord: (payload: {
+    key: string;
+    agentId: string;
+    messageId: string;
+    proposalIndex: number;
+    body: string;
+    decision: "approved" | "denied";
+    reason?: string | null;
+  }) =>
+    invoke<void>("proposal_decision_record", {
+      payload: {
+        key: payload.key,
+        agentId: payload.agentId,
+        messageId: payload.messageId,
+        proposalIndex: payload.proposalIndex,
+        body: payload.body,
+        decision: payload.decision,
+        reason: payload.reason ?? null,
+      },
+    }),
+  bitbucketPrFetch: (url: string) =>
+    invoke<BitbucketPrInfo>("bitbucket_pr_fetch", { url }),
+  bitbucketPrApprove: (url: string) =>
+    invoke<void>("bitbucket_pr_approve", { url }),
 
   // Custom presets
   presetsList: () => invoke<CustomPreset[]>("presets_list"),

@@ -94,8 +94,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     )?;
     let _ = conn.execute("ALTER TABLE boards ADD COLUMN workspace_id TEXT", []);
     let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN description TEXT", []);
-    let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN entry_criteria TEXT", []);
-    let _ = conn.execute("ALTER TABLE board_columns ADD COLUMN exit_criteria TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE board_columns ADD COLUMN entry_criteria TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE board_columns ADD COLUMN exit_criteria TEXT",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE board_columns ADD COLUMN allowed_next_column_ids_json TEXT NOT NULL DEFAULT '[]'",
         [],
@@ -109,7 +115,10 @@ pub fn list_boards(conn: &Connection) -> Result<Vec<Board>> {
     list_boards_for_workspace(conn, None)
 }
 
-pub fn list_boards_for_workspace(conn: &Connection, workspace_id: Option<&str>) -> Result<Vec<Board>> {
+pub fn list_boards_for_workspace(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+) -> Result<Vec<Board>> {
     let (sql, param): (&str, Option<&str>) = if workspace_id.is_some() {
         (
             "SELECT id, workspace_id, name, description, position, created_at, updated_at \
@@ -136,7 +145,12 @@ pub fn list_boards_for_workspace(conn: &Connection, workspace_id: Option<&str>) 
     Ok(out)
 }
 
-pub fn create_board(conn: &Connection, workspace_id: Option<&str>, name: &str, description: Option<&str>) -> Result<Board> {
+pub fn create_board(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Board> {
     create_board_inner(conn, workspace_id, name, description)
 }
 
@@ -176,10 +190,19 @@ pub fn list_boards_old(conn: &Connection) -> Result<Vec<Board>> {
 }
 */
 
-fn create_board_inner(conn: &Connection, workspace_id: Option<&str>, name: &str, description: Option<&str>) -> Result<Board> {
+fn create_board_inner(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Board> {
     let now = Utc::now().to_rfc3339();
     let pos: i64 = conn
-        .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM boards", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM boards",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO boards (workspace_id, name, description, position, created_at, updated_at) \
@@ -261,7 +284,6 @@ struct DefaultColumnRule {
     allowed_next_positions: &'static [usize],
 }
 
-
 pub fn get_board(conn: &Connection, id: i64) -> Result<Board> {
     let board = conn.query_row(
         "SELECT id, workspace_id, name, description, position, created_at, updated_at FROM boards WHERE id = ?1",
@@ -335,7 +357,11 @@ pub fn get_column(conn: &Connection, id: i64) -> Result<BoardColumn> {
     )?)
 }
 
-pub fn find_column_by_title(conn: &Connection, board_id: i64, title: &str) -> Result<Option<BoardColumn>> {
+pub fn find_column_by_title(
+    conn: &Connection,
+    board_id: i64,
+    title: &str,
+) -> Result<Option<BoardColumn>> {
     let mut stmt = conn.prepare(
         "SELECT id, board_id, title, color, description, entry_criteria, exit_criteria, \
                 allowed_next_column_ids_json, position FROM board_columns \
@@ -351,8 +377,7 @@ pub fn find_column_by_title(conn: &Connection, board_id: i64, title: &str) -> Re
 
 fn parse_column_row(r: &rusqlite::Row) -> Result<BoardColumn, rusqlite::Error> {
     let allowed_json: String = r.get(7)?;
-    let allowed_next_column_ids: Vec<i64> =
-        serde_json::from_str(&allowed_json).unwrap_or_default();
+    let allowed_next_column_ids: Vec<i64> = serde_json::from_str(&allowed_json).unwrap_or_default();
     Ok(BoardColumn {
         id: r.get(0)?,
         board_id: r.get(1)?,
@@ -381,7 +406,15 @@ pub fn update_column(
         "UPDATE board_columns SET title = ?2, color = ?3, description = ?4, \
          entry_criteria = ?5, exit_criteria = ?6, allowed_next_column_ids_json = ?7 \
          WHERE id = ?1",
-        params![id, title, color, description, entry_criteria, exit_criteria, allowed_json],
+        params![
+            id,
+            title,
+            color,
+            description,
+            entry_criteria,
+            exit_criteria,
+            allowed_json
+        ],
     )?;
     get_column(conn, id)
 }
@@ -450,11 +483,7 @@ pub struct CardInput {
     pub labels: Vec<String>,
 }
 
-pub fn create_card(
-    conn: &Connection,
-    column_id: i64,
-    input: &CardInput,
-) -> Result<BoardCard> {
+pub fn create_card(conn: &Connection, column_id: i64, input: &CardInput) -> Result<BoardCard> {
     let pos: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM board_cards WHERE column_id = ?1",

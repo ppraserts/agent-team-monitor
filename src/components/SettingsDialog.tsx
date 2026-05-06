@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   X, Database, Palette, Folder, Shield, Trash2, BarChart3, ExternalLink, Zap, Archive,
-  MonitorCheck,
+  MonitorCheck, Gauge,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { cn, fmtCost, fmtNumber } from "../lib/cn";
@@ -36,6 +36,9 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [defaultClaudeBin, setDefaultClaudeBin] = useState("");
   const [defaultSkipPerms, setDefaultSkipPerms] = useState(false);
   const [defaultAllowMentions, setDefaultAllowMentions] = useState(true);
+  const [bitbucketAuthMode, setBitbucketAuthMode] = useState<"bearer" | "basic">("bearer");
+  const [bitbucketUsername, setBitbucketUsername] = useState("");
+  const [bitbucketAppPassword, setBitbucketAppPassword] = useState("");
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [dataPath, setDataPath] = useState("");
@@ -57,6 +60,10 @@ export function SettingsDialog({ open, onClose }: Props) {
   // Auto-compact
   const [autoCompactOn, setAutoCompactOn] = useState(false);
   const [autoCompactThreshold, setAutoCompactThreshold] = useState(85);
+  const [harnessMaxTurns, setHarnessMaxTurns] = useState(0);
+  const [harnessMaxToolCalls, setHarnessMaxToolCalls] = useState(0);
+  const [harnessMaxCostUsd, setHarnessMaxCostUsd] = useState(0);
+  const [harnessMaxRuntimeMin, setHarnessMaxRuntimeMin] = useState(0);
 
   useEffect(() => {
     if (!open) return;
@@ -71,6 +78,9 @@ export function SettingsDialog({ open, onClose }: Props) {
       setDefaultClaudeBin(s.default_claude_bin || "");
       setDefaultSkipPerms(s.default_skip_perms === "true");
       setDefaultAllowMentions(s.default_allow_mentions !== "false");
+      setBitbucketAuthMode(s.bitbucket_auth_mode === "basic" ? "basic" : "bearer");
+      setBitbucketUsername(s.bitbucket_username || "");
+      setBitbucketAppPassword(s.bitbucket_access_token || s.bitbucket_app_password || "");
       setStats(st);
       setDiagnostics(diag);
       setDataPath(dp);
@@ -91,6 +101,10 @@ export function SettingsDialog({ open, onClose }: Props) {
 
       setAutoCompactOn(s.auto_compact === "true");
       setAutoCompactThreshold(numOr(s.auto_compact_threshold, 85));
+      setHarnessMaxTurns(numOr(s.harness_max_turns, 0));
+      setHarnessMaxToolCalls(numOr(s.harness_max_tool_calls, 0));
+      setHarnessMaxCostUsd(numOr(s.harness_max_cost_usd, 0));
+      setHarnessMaxRuntimeMin(Math.round(numOr(s.harness_max_runtime_ms, 0) / 60000));
     }).catch(console.error);
   }, [open]);
 
@@ -225,6 +239,48 @@ export function SettingsDialog({ open, onClose }: Props) {
             />
           </Section>
 
+          {/* ----- Review integrations ----- */}
+          <Section icon={<Shield size={12} />} title="Review integrations">
+            <Field label="Bitbucket auth mode">
+              <select
+                value={bitbucketAuthMode}
+                onChange={(e) => {
+                  const next = e.target.value === "basic" ? "basic" : "bearer";
+                  setBitbucketAuthMode(next);
+                  save("bitbucket_auth_mode", next);
+                }}
+                className="input text-xs"
+              >
+                <option value="bearer">Bearer access token</option>
+                <option value="basic">Email/username + API token</option>
+              </select>
+            </Field>
+            <Field label={bitbucketAuthMode === "basic" ? "Atlassian email or Bitbucket username" : "Bitbucket username (optional)"}>
+              <input
+                value={bitbucketUsername}
+                onChange={(e) => setBitbucketUsername(e.target.value)}
+                onBlur={() => save("bitbucket_username", bitbucketUsername.trim())}
+                placeholder={bitbucketAuthMode === "basic" ? "your Atlassian account email" : "not required for access token"}
+                className="input font-mono text-xs"
+              />
+            </Field>
+            <Field label={bitbucketAuthMode === "basic" ? "Bitbucket API token" : "Bitbucket access token"}>
+              <input
+                type="password"
+                value={bitbucketAppPassword}
+                onChange={(e) => setBitbucketAppPassword(e.target.value)}
+                onBlur={() => save("bitbucket_access_token", bitbucketAppPassword.trim())}
+                placeholder={bitbucketAuthMode === "basic" ? "scoped API token with pull request read/write" : "token from Repository settings > Access tokens"}
+                className="input font-mono text-xs"
+              />
+            </Field>
+            <div className="text-[10px] text-base-500">
+              Used by PR Reviews to fetch changed files and approve PRs. Repository access tokens use
+              Bearer auth. Atlassian account API tokens use Basic auth with your account email and
+              token.
+            </div>
+          </Section>
+
           {/* ----- Runtime diagnostics ----- */}
           <Section icon={<MonitorCheck size={12} />} title="Windows runtime diagnostics">
             {diagnostics ? (
@@ -312,6 +368,48 @@ export function SettingsDialog({ open, onClose }: Props) {
                 className="w-full accent-(--color-accent-cyan)"
               />
             </Field>
+          </Section>
+
+          <Section icon={<Gauge size={12} />} title="Reliability harness defaults">
+            <div className="text-[10px] text-base-500">
+              Zero means unlimited. Non-zero budgets are copied into new agents and enforced by the backend with an audit event and kill switch.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField
+                label="Max turns per agent"
+                value={harnessMaxTurns}
+                onChange={(v) => {
+                  setHarnessMaxTurns(v);
+                  save("harness_max_turns", String(Math.max(0, Math.floor(v))));
+                }}
+              />
+              <NumberField
+                label="Max tool calls per agent"
+                value={harnessMaxToolCalls}
+                onChange={(v) => {
+                  setHarnessMaxToolCalls(v);
+                  save("harness_max_tool_calls", String(Math.max(0, Math.floor(v))));
+                }}
+              />
+              <NumberField
+                label="Max cost per agent ($)"
+                value={harnessMaxCostUsd}
+                step={0.01}
+                onChange={(v) => {
+                  setHarnessMaxCostUsd(v);
+                  save("harness_max_cost_usd", String(Math.max(0, v)));
+                }}
+              />
+              <NumberField
+                label="Max runtime per agent (minutes)"
+                value={harnessMaxRuntimeMin}
+                onChange={(v) => {
+                  const minutes = Math.max(0, Math.floor(v));
+                  setHarnessMaxRuntimeMin(minutes);
+                  save("harness_max_runtime_ms", String(minutes * 60000));
+                }}
+              />
+            </div>
           </Section>
 
           {/* ----- Plan limits (mirrors claude.ai) ----- */}

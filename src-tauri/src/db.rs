@@ -162,6 +162,29 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_usage_agent_ts
                 ON usage_events(agent_id, ts);
 
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id        TEXT,
+                event_type      TEXT NOT NULL,
+                severity        TEXT NOT NULL,
+                message         TEXT NOT NULL,
+                data_json       TEXT,
+                ts              TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_agent_ts
+                ON audit_events(agent_id, ts);
+
+            CREATE TABLE IF NOT EXISTS proposal_events (
+                key             TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                message_id      TEXT NOT NULL,
+                proposal_index  INTEGER NOT NULL,
+                body            TEXT NOT NULL,
+                decision        TEXT NOT NULL,
+                reason          TEXT,
+                decided_at      TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -204,6 +227,22 @@ impl Db {
         .context("migrate schema")?;
         let _ = conn.execute("ALTER TABLE agents ADD COLUMN vendor_binary TEXT", []);
         let _ = conn.execute("ALTER TABLE agents ADD COLUMN workspace_id TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN max_tool_calls INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN max_cost_usd REAL NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN max_runtime_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 
@@ -278,7 +317,9 @@ impl Db {
     ) -> Result<Mission> {
         let conn = self.conn.lock();
         let now = Utc::now().to_rfc3339();
-        let mission_id = id.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mission_id = id
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         conn.execute(
             "INSERT INTO missions (
                 id, workspace_id, title, goal, definition_of_done, constraints, status, created_at, updated_at
@@ -336,9 +377,10 @@ impl Db {
             INSERT INTO agents (
                 id, workspace_id, name, role, cwd, vendor, model, color, system_prompt,
                 vendor_binary, skip_permissions, allow_mentions,
-                mention_allowlist, created_at, last_seen_at
+                mention_allowlist, max_turns, max_tool_calls, max_cost_usd,
+                max_runtime_ms, created_at, last_seen_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18)
             ON CONFLICT(id) DO UPDATE SET
                 workspace_id = excluded.workspace_id,
                 name = excluded.name,
@@ -352,6 +394,10 @@ impl Db {
                 skip_permissions = excluded.skip_permissions,
                 allow_mentions = excluded.allow_mentions,
                 mention_allowlist = excluded.mention_allowlist,
+                max_turns = excluded.max_turns,
+                max_tool_calls = excluded.max_tool_calls,
+                max_cost_usd = excluded.max_cost_usd,
+                max_runtime_ms = excluded.max_runtime_ms,
                 last_seen_at = excluded.last_seen_at
             "#,
             params![
@@ -368,6 +414,10 @@ impl Db {
                 spec.skip_permissions as i64,
                 spec.allow_mentions as i64,
                 allowlist_json,
+                spec.max_turns as i64,
+                spec.max_tool_calls as i64,
+                spec.max_cost_usd,
+                spec.max_runtime_ms as i64,
                 now,
             ],
         )?;
@@ -399,7 +449,8 @@ impl Db {
             SELECT
                 a.id, a.workspace_id, a.name, a.role, a.cwd, a.vendor, a.model, a.color,
                 a.system_prompt, a.vendor_binary, a.skip_permissions,
-                a.allow_mentions, a.mention_allowlist, a.session_id, a.last_seen_at,
+                a.allow_mentions, a.mention_allowlist, a.max_turns, a.max_tool_calls,
+                a.max_cost_usd, a.max_runtime_ms, a.session_id, a.last_seen_at,
                 COALESCE((SELECT COUNT(*) FROM messages WHERE agent_id = a.id), 0) AS msg_count,
                 COALESCE((SELECT SUM(input_tokens) FROM usage_events WHERE agent_id = a.id), 0) AS in_tok,
                 COALESCE((SELECT SUM(output_tokens) FROM usage_events WHERE agent_id = a.id), 0) AS out_tok,
@@ -415,9 +466,8 @@ impl Db {
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cwd_str: String = row.get(4)?;
             let allowlist_json: String = row.get(12)?;
-            let allowlist: Vec<String> =
-                serde_json::from_str(&allowlist_json).unwrap_or_default();
-            let last_seen_str: String = row.get(14)?;
+            let allowlist: Vec<String> = serde_json::from_str(&allowlist_json).unwrap_or_default();
+            let last_seen_str: String = row.get(18)?;
             let spec = AgentSpec {
                 workspace_id: row.get(1)?,
                 name: row.get(2)?,
@@ -431,21 +481,25 @@ impl Db {
                 skip_permissions: row.get::<_, i64>(10)? != 0,
                 allow_mentions: row.get::<_, i64>(11)? != 0,
                 mention_allowlist: allowlist,
+                max_turns: row.get::<_, i64>(13)? as u64,
+                max_tool_calls: row.get::<_, i64>(14)? as u64,
+                max_cost_usd: row.get::<_, f64>(15)?,
+                max_runtime_ms: row.get::<_, i64>(16)? as u64,
             };
             let usage = AgentUsage {
-                input_tokens: row.get::<_, i64>(16)? as u64,
-                output_tokens: row.get::<_, i64>(17)? as u64,
-                cache_read_tokens: row.get::<_, i64>(18)? as u64,
-                cache_creation_tokens: row.get::<_, i64>(19)? as u64,
-                total_cost_usd: row.get::<_, f64>(20)?,
-                turns: row.get::<_, i64>(21)? as u64,
+                input_tokens: row.get::<_, i64>(20)? as u64,
+                output_tokens: row.get::<_, i64>(21)? as u64,
+                cache_read_tokens: row.get::<_, i64>(22)? as u64,
+                cache_creation_tokens: row.get::<_, i64>(23)? as u64,
+                total_cost_usd: row.get::<_, f64>(24)?,
+                turns: row.get::<_, i64>(25)? as u64,
             };
             Ok(HistoryAgent {
                 id: row.get(0)?,
                 spec,
-                session_id: row.get(13)?,
+                session_id: row.get(17)?,
                 last_seen_at: parse_ts(&last_seen_str),
-                message_count: row.get::<_, i64>(15)? as u64,
+                message_count: row.get::<_, i64>(19)? as u64,
                 usage,
             })
         })?;
@@ -479,7 +533,14 @@ impl Db {
             INSERT OR IGNORE INTO messages (id, agent_id, role, content, from_agent_id, ts)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
-            params![msg_id, agent_id, role, content, from_agent_id, ts.to_rfc3339()],
+            params![
+                msg_id,
+                agent_id,
+                role,
+                content,
+                from_agent_id,
+                ts.to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -601,6 +662,87 @@ impl Db {
         })
     }
 
+    // ---------------- audit / proposals ----------------
+
+    pub fn save_audit_event(
+        &self,
+        agent_id: Option<&str>,
+        event_type: &str,
+        severity: &str,
+        message: &str,
+        data: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        let data_json = data.map(|v| v.to_string());
+        conn.execute(
+            "INSERT INTO audit_events (agent_id, event_type, severity, message, data_json, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                agent_id,
+                event_type,
+                severity,
+                message,
+                data_json,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_proposal_decision(
+        &self,
+        key: &str,
+        agent_id: &str,
+        message_id: &str,
+        proposal_index: i64,
+        body: &str,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO proposal_events (
+                key, agent_id, message_id, proposal_index, body, decision, reason, decided_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(key) DO UPDATE SET
+                decision = excluded.decision,
+                reason = excluded.reason,
+                decided_at = excluded.decided_at",
+            params![
+                key,
+                agent_id,
+                message_id,
+                proposal_index,
+                body,
+                decision,
+                reason,
+                now
+            ],
+        )?;
+        drop(conn);
+        self.save_audit_event(
+            Some(agent_id),
+            "proposal_decision",
+            if decision == "approved" {
+                "info"
+            } else {
+                "warn"
+            },
+            &format!(
+                "proposal {} for message {} was {}",
+                proposal_index, message_id, decision
+            ),
+            Some(&serde_json::json!({
+                "key": key,
+                "message_id": message_id,
+                "proposal_index": proposal_index,
+                "decision": decision,
+                "reason": reason,
+            })),
+        )
+    }
+
     // ---------------- settings ----------------
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
@@ -682,9 +824,7 @@ impl Db {
 
     pub fn clear_all(&self) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM usage_events; DELETE FROM agents;",
-        )?;
+        conn.execute_batch("DELETE FROM messages; DELETE FROM usage_events; DELETE FROM agents;")?;
         Ok(())
     }
 }

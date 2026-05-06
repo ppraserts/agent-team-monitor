@@ -20,6 +20,10 @@ export interface AgentSpec {
   skip_permissions?: boolean;
   allow_mentions?: boolean;
   mention_allowlist?: string[];
+  max_turns?: number;
+  max_tool_calls?: number;
+  max_cost_usd?: number;
+  max_runtime_ms?: number;
 }
 
 export interface AgentUsage {
@@ -97,7 +101,15 @@ export type AgentEvent =
       code: number | null;
       stderr_tail: string[];
     }
-  | { kind: "stderr"; agent_id: string; line: string };
+  | { kind: "stderr"; agent_id: string; line: string }
+  | {
+      kind: "harness_alert";
+      agent_id: string;
+      severity: string;
+      failure_mode: string;
+      message: string;
+      ts: string;
+    };
 
 export interface ChatMessage {
   id: string;
@@ -149,6 +161,21 @@ export interface ImageAttachment {
   name: string;
   path: string;
   mime: string;
+}
+
+export interface BitbucketPrInfo {
+  workspace: string;
+  repo: string;
+  prId: number;
+  url: string;
+  title: string;
+  state: string;
+  author: string;
+  sourceBranch: string;
+  destinationBranch: string;
+  sourceCommit?: string | null;
+  changedFiles: string[];
+  hasMoreFiles: boolean;
 }
 
 export interface FileContent {

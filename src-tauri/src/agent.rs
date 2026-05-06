@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
 use crate::boards::BoardCard;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -35,6 +35,20 @@ pub struct AgentSpec {
     /// Empty list with `allow_mentions=true` means "any agent".
     #[serde(default)]
     pub mention_allowlist: Vec<String>,
+
+    // ----- Reliability harness -----
+    /// Maximum completed turns before the harness stops the agent. 0 = unlimited.
+    #[serde(default)]
+    pub max_turns: u64,
+    /// Maximum tool calls before the harness stops the agent. 0 = unlimited.
+    #[serde(default)]
+    pub max_tool_calls: u64,
+    /// Maximum accumulated cost before the harness stops the agent. 0 = unlimited.
+    #[serde(default)]
+    pub max_cost_usd: f64,
+    /// Maximum wall-clock runtime in milliseconds before the harness stops the agent. 0 = unlimited.
+    #[serde(default)]
+    pub max_runtime_ms: u64,
 }
 
 /// Optional resume parameters when re-spawning an agent from history.
@@ -84,8 +98,13 @@ pub struct AgentSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentEvent {
-    Created { snapshot: AgentSnapshot },
-    Status { agent_id: String, status: AgentStatus },
+    Created {
+        snapshot: AgentSnapshot,
+    },
+    Status {
+        agent_id: String,
+        status: AgentStatus,
+    },
     Message {
         agent_id: String,
         role: String,
@@ -131,5 +150,15 @@ pub enum AgentEvent {
         code: Option<i32>,
         stderr_tail: Vec<String>,
     },
-    Stderr { agent_id: String, line: String },
+    Stderr {
+        agent_id: String,
+        line: String,
+    },
+    HarnessAlert {
+        agent_id: String,
+        severity: String,
+        failure_mode: String,
+        message: String,
+        ts: DateTime<Utc>,
+    },
 }

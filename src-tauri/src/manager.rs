@@ -41,6 +41,7 @@ struct AgentHandle {
     message_count: Arc<RwLock<u64>>,
     /// Most recent turn's total input tokens (current context size).
     current_context: Arc<RwLock<u64>>,
+    tool_calls: Arc<RwLock<u64>>,
     stdin_tx: mpsc::Sender<String>,
     /// Encoder for outbound user messages (vendor-specific).
     encode_user: Arc<dyn Fn(&str) -> String + Send + Sync>,
@@ -48,6 +49,7 @@ struct AgentHandle {
     /// is honored — the option is consumed on first use.
     kill_tx: Mutex<Option<oneshot::Sender<()>>>,
     last_activity: Arc<RwLock<chrono::DateTime<Utc>>>,
+    started_at: chrono::DateTime<Utc>,
     stderr_tail: Arc<RwLock<Vec<String>>>,
 }
 
@@ -161,10 +163,12 @@ impl AgentManager {
             usage: Arc::new(RwLock::new(AgentUsage::default())),
             message_count: Arc::new(RwLock::new(0)),
             current_context: Arc::new(RwLock::new(0)),
+            tool_calls: Arc::new(RwLock::new(0)),
             stdin_tx,
             encode_user,
             kill_tx: Mutex::new(Some(kill_tx)),
             last_activity: Arc::new(RwLock::new(Utc::now())),
+            started_at: Utc::now(),
             stderr_tail: Arc::new(RwLock::new(Vec::new())),
         });
 
@@ -184,9 +188,12 @@ impl AgentManager {
         spawn_stdout_reader(self.clone(), id.clone(), stdout, adapter);
         spawn_stderr_reader(self.clone(), id.clone(), stderr, handle.stderr_tail.clone());
         spawn_exit_watcher(self.clone(), id.clone(), child, kill_rx);
+        spawn_runtime_watchdog(self.clone(), id.clone());
 
         let snap = snapshot_of(&handle);
-        self.emit(AgentEvent::Created { snapshot: snap.clone() });
+        self.emit(AgentEvent::Created {
+            snapshot: snap.clone(),
+        });
         self.set_status(&id, AgentStatus::Idle);
 
         // NOTE: we deliberately do NOT broadcast a chat message to existing
@@ -247,7 +254,11 @@ impl AgentManager {
                     return None;
                 }
                 let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if branch.is_empty() { None } else { Some(branch) }
+                if branch.is_empty() {
+                    None
+                } else {
+                    Some(branch)
+                }
             })
             .unwrap_or_else(|| "not-a-git-repo-or-detached".to_string());
         format!(
@@ -417,7 +428,10 @@ impl AgentManager {
         };
 
         let line = (handle.encode_user)(&stdin_full);
-        handle.stdin_tx.send(line).await
+        handle
+            .stdin_tx
+            .send(line)
+            .await
             .context("failed to send to agent stdin")?;
 
         let ts = Utc::now();
@@ -508,8 +522,12 @@ fn snapshot_of(h: &AgentHandle) -> AgentSnapshot {
 fn spawn_stdin_pump(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>) {
     tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
-            if stdin.write_all(line.as_bytes()).await.is_err() { break; }
-            if stdin.flush().await.is_err() { break; }
+            if stdin.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdin.flush().await.is_err() {
+                break;
+            }
         }
     });
 }
@@ -550,7 +568,10 @@ fn spawn_stderr_reader(
                     tail.drain(0..drop_count);
                 }
             }
-            mgr.emit(AgentEvent::Stderr { agent_id: agent_id.clone(), line });
+            mgr.emit(AgentEvent::Stderr {
+                agent_id: agent_id.clone(),
+                line,
+            });
         }
     });
 }
@@ -583,6 +604,25 @@ fn spawn_exit_watcher(
             .get(&agent_id)
             .map(|h| (Some(h.spec.name.clone()), h.stderr_tail.read().clone()))
             .unwrap_or((None, Vec::new()));
+        let severity = if exit_code == Some(0) { "info" } else { "warn" };
+        let message = match exit_code {
+            Some(0) => "agent process exited cleanly".to_string(),
+            Some(code) => format!("agent process exited with code {}", code),
+            None => "agent process was stopped or exited without a code".to_string(),
+        };
+        if let Err(e) = mgr.db.save_audit_event(
+            Some(&agent_id),
+            "process_exit",
+            severity,
+            &message,
+            Some(&serde_json::json!({
+                "agent_name": agent_name.clone(),
+                "exit_code": exit_code,
+                "stderr_tail": stderr_tail.clone(),
+            })),
+        ) {
+            tracing::warn!("db save_audit_event(process_exit) failed: {}", e);
+        }
 
         // Clean up registry atomically before notifying the UI so that
         // subsequent re-spawn under the same name succeeds.
@@ -621,10 +661,15 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
             let ts = Utc::now();
             detect_and_route_mentions(mgr, agent_id, &text).await;
             detect_and_apply_board_actions(mgr, agent_id, &text).await;
-            let display_text = strip_tagged_blocks(&text, "BOARD_ACTION").trim().to_string();
+            let display_text = strip_tagged_blocks(&text, "BOARD_ACTION")
+                .trim()
+                .to_string();
             if !display_text.is_empty() {
                 let msg_id = uuid::Uuid::new_v4().to_string();
-                if let Err(e) = mgr.db.save_message(&msg_id, agent_id, "assistant", &display_text, None, ts) {
+                if let Err(e) =
+                    mgr.db
+                        .save_message(&msg_id, agent_id, "assistant", &display_text, None, ts)
+                {
                     tracing::warn!("db save_message(assistant) failed: {}", e);
                 }
                 mgr.emit(AgentEvent::Message {
@@ -639,6 +684,9 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
         ParsedEvent::ToolUse { tool, input } => {
             mgr.set_status(agent_id, AgentStatus::Working);
             let ts = Utc::now();
+            if let Some(h) = mgr.registry.read().by_id.get(agent_id).cloned() {
+                *h.tool_calls.write() += 1;
+            }
             if let Some(action) = tool.strip_prefix("board.") {
                 apply_board_tool_use(mgr, agent_id, action, &input, ts).await;
             }
@@ -653,7 +701,10 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
                 ts,
             });
         }
-        ParsedEvent::Result { usage: delta, duration_ms } => {
+        ParsedEvent::Result {
+            usage: delta,
+            duration_ms,
+        } => {
             let ts = Utc::now();
             if let Err(e) = mgr.db.save_usage(agent_id, &delta, duration_ms, ts) {
                 tracing::warn!("db save_usage failed: {}", e);
@@ -672,9 +723,8 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
                 // Current context size = this turn's total input tokens
                 // (not cumulative). Each turn's input field reflects the
                 // entire conversation length sent to the model.
-                let ctx = delta.input_tokens
-                    + delta.cache_read_tokens
-                    + delta.cache_creation_tokens;
+                let ctx =
+                    delta.input_tokens + delta.cache_read_tokens + delta.cache_creation_tokens;
                 *h.current_context.write() = ctx;
                 mgr.emit(AgentEvent::Result {
                     agent_id: agent_id.to_string(),
@@ -682,12 +732,128 @@ async fn handle_parsed_event(mgr: &AgentManager, agent_id: &str, event: ParsedEv
                     duration_ms,
                 });
             }
+            enforce_reliability_policy(mgr, agent_id).await;
             mgr.set_status(agent_id, AgentStatus::Idle);
         }
     }
 
     // Update last_seen on any activity (cheap; only one row touched).
     let _ = mgr.db.touch_agent_seen(agent_id);
+}
+
+fn spawn_runtime_watchdog(mgr: AgentManager, agent_id: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let h = {
+                let reg = mgr.registry.read();
+                reg.by_id.get(&agent_id).cloned()
+            };
+            let Some(h) = h else {
+                break;
+            };
+            let max_runtime_ms = h.spec.max_runtime_ms;
+            if max_runtime_ms == 0 {
+                break;
+            }
+            let elapsed_ms = (Utc::now() - h.started_at).num_milliseconds().max(0) as u64;
+            if elapsed_ms >= max_runtime_ms {
+                emit_harness_alert(
+                    &mgr,
+                    &agent_id,
+                    "error",
+                    "latency_budget_exceeded",
+                    &format!(
+                        "runtime exceeded {} ms; stopping agent to avoid a runaway run",
+                        max_runtime_ms
+                    ),
+                    Some(serde_json::json!({
+                        "elapsed_ms": elapsed_ms,
+                        "max_runtime_ms": max_runtime_ms,
+                    })),
+                );
+                let _ = mgr.kill(&agent_id).await;
+                break;
+            }
+        }
+    });
+}
+
+async fn enforce_reliability_policy(mgr: &AgentManager, agent_id: &str) {
+    let h = {
+        let reg = mgr.registry.read();
+        reg.by_id.get(agent_id).cloned()
+    };
+    let Some(h) = h else {
+        return;
+    };
+    let usage = h.usage.read().clone();
+    let tool_calls = *h.tool_calls.read();
+    let ctx = *h.current_context.read();
+    let mut breach: Option<(&str, String, serde_json::Value)> = None;
+
+    if h.spec.max_turns > 0 && usage.turns >= h.spec.max_turns {
+        breach = Some((
+            "max_turns_exceeded",
+            format!("turn budget reached ({}/{})", usage.turns, h.spec.max_turns),
+            serde_json::json!({ "turns": usage.turns, "max_turns": h.spec.max_turns }),
+        ));
+    } else if h.spec.max_tool_calls > 0 && tool_calls >= h.spec.max_tool_calls {
+        breach = Some((
+            "tool_call_budget_exceeded",
+            format!(
+                "tool-call budget reached ({}/{})",
+                tool_calls, h.spec.max_tool_calls
+            ),
+            serde_json::json!({ "tool_calls": tool_calls, "max_tool_calls": h.spec.max_tool_calls }),
+        ));
+    } else if h.spec.max_cost_usd > 0.0 && usage.total_cost_usd >= h.spec.max_cost_usd {
+        breach = Some((
+            "cost_budget_exceeded",
+            format!(
+                "cost budget reached (${:.4}/${:.4})",
+                usage.total_cost_usd, h.spec.max_cost_usd
+            ),
+            serde_json::json!({ "cost_usd": usage.total_cost_usd, "max_cost_usd": h.spec.max_cost_usd }),
+        ));
+    } else if ctx >= 190_000 {
+        breach = Some((
+            "context_overflow_risk",
+            format!("context is near hard limit ({} tokens)", ctx),
+            serde_json::json!({ "current_context_tokens": ctx, "hard_context_warning": 190000 }),
+        ));
+    }
+
+    if let Some((failure_mode, message, data)) = breach {
+        emit_harness_alert(mgr, agent_id, "error", failure_mode, &message, Some(data));
+        let _ = mgr.kill(agent_id).await;
+    }
+}
+
+fn emit_harness_alert(
+    mgr: &AgentManager,
+    agent_id: &str,
+    severity: &str,
+    failure_mode: &str,
+    message: &str,
+    data: Option<serde_json::Value>,
+) {
+    if let Err(e) = mgr.db.save_audit_event(
+        Some(agent_id),
+        failure_mode,
+        severity,
+        message,
+        data.as_ref(),
+    ) {
+        tracing::warn!("db save_audit_event failed: {}", e);
+    }
+    mgr.emit(AgentEvent::HarnessAlert {
+        agent_id: agent_id.to_string(),
+        severity: severity.to_string(),
+        failure_mode: failure_mode.to_string(),
+        message: message.to_string(),
+        ts: Utc::now(),
+    });
 }
 
 /// Append a live team-roster section to the agent's system prompt so it knows
@@ -724,8 +890,19 @@ fn inject_team_roster(spec: &AgentSpec, live_roster: &[String]) -> AgentSpec {
     let board_protocol = "\n\n--- BOARD ACTION PROTOCOL ---\nWhen you discover useful follow-up work, planning steps, bugs, subtasks, or status changes, you may ask the app to update the board. Use exactly one JSON object inside <BOARD_ACTION>...</BOARD_ACTION>. Supported: create_card, move_card, update_card, delete_card. Use board/card/column ids from BOARD CONTEXT. Keep card titles short and actionable. The app validates lane rules and will report success/failure.\n";
 
     let new_prompt = match &spec.system_prompt {
-        Some(p) if !p.trim().is_empty() => Some(format!("{}{}{}{}", p.trim_end(), roster_line, collaboration_protocol, board_protocol)),
-        _ => Some(format!("{}{}{}", roster_line.trim_start(), collaboration_protocol, board_protocol)),
+        Some(p) if !p.trim().is_empty() => Some(format!(
+            "{}{}{}{}",
+            p.trim_end(),
+            roster_line,
+            collaboration_protocol,
+            board_protocol
+        )),
+        _ => Some(format!(
+            "{}{}{}",
+            roster_line.trim_start(),
+            collaboration_protocol,
+            board_protocol
+        )),
     };
 
     AgentSpec {
@@ -768,7 +945,10 @@ struct BoardActionRequest {
 }
 
 async fn detect_and_apply_board_actions(mgr: &AgentManager, agent_id: &str, text: &str) {
-    for raw in extract_tagged_blocks(text, "BOARD_ACTION").into_iter().take(5) {
+    for raw in extract_tagged_blocks(text, "BOARD_ACTION")
+        .into_iter()
+        .take(5)
+    {
         let ts = Utc::now();
         let parsed = serde_json::from_str::<BoardActionRequest>(&raw);
         let (action, result) = match parsed {
@@ -843,7 +1023,10 @@ async fn apply_board_tool_use(
                 "move_card" => format!("moved card #{}: {}", card.id, card.title),
                 "update_card" => format!("updated card #{}: {}", card.id, card.title),
                 "delete_card" => format!("deleted card #{}: {}", card.id, card.title),
-                _ => format!("applied board.{} to card #{}: {}", action, card.id, card.title),
+                _ => format!(
+                    "applied board.{} to card #{}: {}",
+                    action, card.id, card.title
+                ),
             };
             send_board_action_result(mgr, agent_id, action, true, &msg, Some(&card)).await;
             mgr.emit(AgentEvent::BoardAction {
@@ -900,7 +1083,11 @@ async fn send_board_action_result(
     );
 
     if let Err(e) = mgr.send_internal_note(agent_id, note).await {
-        tracing::warn!("failed to send board action result to agent {}: {}", agent_id, e);
+        tracing::warn!(
+            "failed to send board action result to agent {}: {}",
+            agent_id,
+            e
+        );
     }
 }
 
@@ -914,9 +1101,11 @@ fn board_action_from_tool_input(action: &str, input: &serde_json::Value) -> Boar
     };
     let get_usize = |keys: &[&str]| -> Option<usize> {
         keys.iter().find_map(|key| {
-            input
-                .get(*key)
-                .and_then(|v| v.as_u64().map(|n| n as usize).or_else(|| v.as_str()?.parse::<usize>().ok()))
+            input.get(*key).and_then(|v| {
+                v.as_u64()
+                    .map(|n| n as usize)
+                    .or_else(|| v.as_str()?.parse::<usize>().ok())
+            })
         })
     };
     let get_string = |keys: &[&str]| -> Option<String> {
@@ -963,7 +1152,14 @@ fn board_action_from_tool_input(action: &str, input: &serde_json::Value) -> Boar
         lane: get_string(&["lane"]),
         column: get_string(&["column"]),
         card_id: get_i64(&["card_id", "cardId", "id"]),
-        new_column_id: get_i64(&["new_column_id", "newColumnId", "to_column_id", "toColumnId", "target_column_id", "targetColumnId"]),
+        new_column_id: get_i64(&[
+            "new_column_id",
+            "newColumnId",
+            "to_column_id",
+            "toColumnId",
+            "target_column_id",
+            "targetColumnId",
+        ]),
         to_lane: get_string(&["to_lane", "toLane", "target_lane", "targetLane"]),
         to_column: get_string(&["to_column", "toColumn", "target_column", "targetColumn"]),
         new_position: get_usize(&["new_position", "newPosition", "position"]),
@@ -975,70 +1171,89 @@ fn board_action_from_tool_input(action: &str, input: &serde_json::Value) -> Boar
 }
 
 fn apply_board_action(mgr: &AgentManager, req: &BoardActionRequest) -> Result<BoardCard> {
-    mgr.db.with_conn(|conn| {
-        match req.action.as_str() {
-            "create_card" => {
-                let title = req
-                    .title
+    mgr.db.with_conn(|conn| match req.action.as_str() {
+        "create_card" => {
+            let title = req
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("card title is required"))?;
+            if title.chars().count() > 160 {
+                return Err(anyhow!("card title is too long"));
+            }
+            let board_id = resolve_board_id(conn, req)?;
+            let column_id = resolve_column_id(
+                conn,
+                req,
+                board_id,
+                req.column_id,
+                req.lane
                     .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("card title is required"))?;
-                if title.chars().count() > 160 {
-                    return Err(anyhow!("card title is too long"));
-                }
-                let board_id = resolve_board_id(conn, req)?;
-                let column_id = resolve_column_id(conn, req, board_id, req.column_id, req.lane.as_deref().or(req.column.as_deref()).or(Some("Backlog")))?;
-                let input = CardInput {
-                    title: title.to_string(),
-                    description: req.description.clone(),
-                    assignees: req.assignees.clone(),
-                    labels: req.labels.clone(),
-                };
-                boards::create_card(conn, column_id, &input)
-            }
-            "move_card" => {
-                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
-                let card = boards::get_card(conn, card_id)?;
-                let from_col = boards::get_column(conn, card.column_id)?;
-                let to_col_id = resolve_column_id(
-                    conn,
-                    req,
-                    from_col.board_id,
-                    req.new_column_id.or(req.column_id),
-                    req.to_lane.as_deref().or(req.to_column.as_deref()).or(req.lane.as_deref()).or(req.column.as_deref()),
-                )?;
-                validate_card_transition(conn, card.column_id, to_col_id)?;
-                boards::move_card(conn, card_id, to_col_id, req.new_position.unwrap_or(0))
-            }
-            "update_card" => {
-                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
-                let current = boards::get_card(conn, card_id)?;
-                let title = req
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&current.title);
-                if title.chars().count() > 160 {
-                    return Err(anyhow!("card title is too long"));
-                }
-                let input = CardInput {
-                    title: title.to_string(),
-                    description: req.description.clone().or(current.description),
-                    assignees: if req.assignees.is_empty() { current.assignees } else { req.assignees.clone() },
-                    labels: if req.labels.is_empty() { current.labels } else { req.labels.clone() },
-                };
-                boards::update_card(conn, card_id, &input)
-            }
-            "delete_card" => {
-                let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
-                let current = boards::get_card(conn, card_id)?;
-                boards::delete_card(conn, card_id)?;
-                Ok(current)
-            }
-            other => Err(anyhow!("unsupported board action '{}'", other)),
+                    .or(req.column.as_deref())
+                    .or(Some("Backlog")),
+            )?;
+            let input = CardInput {
+                title: title.to_string(),
+                description: req.description.clone(),
+                assignees: req.assignees.clone(),
+                labels: req.labels.clone(),
+            };
+            boards::create_card(conn, column_id, &input)
         }
+        "move_card" => {
+            let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+            let card = boards::get_card(conn, card_id)?;
+            let from_col = boards::get_column(conn, card.column_id)?;
+            let to_col_id = resolve_column_id(
+                conn,
+                req,
+                from_col.board_id,
+                req.new_column_id.or(req.column_id),
+                req.to_lane
+                    .as_deref()
+                    .or(req.to_column.as_deref())
+                    .or(req.lane.as_deref())
+                    .or(req.column.as_deref()),
+            )?;
+            validate_card_transition(conn, card.column_id, to_col_id)?;
+            boards::move_card(conn, card_id, to_col_id, req.new_position.unwrap_or(0))
+        }
+        "update_card" => {
+            let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+            let current = boards::get_card(conn, card_id)?;
+            let title = req
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&current.title);
+            if title.chars().count() > 160 {
+                return Err(anyhow!("card title is too long"));
+            }
+            let input = CardInput {
+                title: title.to_string(),
+                description: req.description.clone().or(current.description),
+                assignees: if req.assignees.is_empty() {
+                    current.assignees
+                } else {
+                    req.assignees.clone()
+                },
+                labels: if req.labels.is_empty() {
+                    current.labels
+                } else {
+                    req.labels.clone()
+                },
+            };
+            boards::update_card(conn, card_id, &input)
+        }
+        "delete_card" => {
+            let card_id = req.card_id.ok_or_else(|| anyhow!("card_id is required"))?;
+            let current = boards::get_card(conn, card_id)?;
+            boards::delete_card(conn, card_id)?;
+            Ok(current)
+        }
+        other => Err(anyhow!("unsupported board action '{}'", other)),
     })
 }
 
@@ -1080,7 +1295,11 @@ fn resolve_column_id(
         .ok_or_else(|| anyhow!("lane '{}' not found on board #{}", lane, board_id))
 }
 
-fn validate_card_transition(conn: &rusqlite::Connection, from_col_id: i64, to_col_id: i64) -> Result<()> {
+fn validate_card_transition(
+    conn: &rusqlite::Connection,
+    from_col_id: i64,
+    to_col_id: i64,
+) -> Result<()> {
     if from_col_id == to_col_id {
         return Ok(());
     }
@@ -1206,7 +1425,8 @@ async fn detect_and_route_mentions(mgr: &AgentManager, from_id: &str, text: &str
     // Group all `@Name <msg>` lines by target so a single agent receives ONE
     // forwarded message even if it was addressed multiple times in the same
     // reply.
-    let mut by_target: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut by_target: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     for (to_name, msg) in find_mentions(text) {
         // --- Policy enforcement ---
         if !allow_mentions {
